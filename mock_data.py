@@ -91,6 +91,8 @@ def generate_dc(n_rows: int = 300, seed: int | None = 42) -> pd.DataFrame:
 PROBE_CARD_IDS = [f"PC{n:03d}" for n in range(1, 9)]
 EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
 LOT_TYPES = ["MP", "ENG", "MONITOR", "RND"]
+RW_CNT_VALUES = [0, 1, 2, 3, 4, 5]
+RW_CNT_PROBS = [0.80, 0.15, 0.03, 0.015, 0.004, 0.001]
 
 # per-product item value profile: (center, spread) so each product's
 # item columns look distinct from one another
@@ -105,7 +107,10 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     """Generate a mock wide-format probe test dataframe for a single product.
 
     Columns: root_lot_id, wafer_id, tkout_time, probe_card_id, eqp_id,
-    lot_type, item1..itemN (N = PRODUCT_CONFIG[product]['n_items']).
+    lot_type, rw_cnt, item1..itemN (N = PRODUCT_CONFIG[product]['n_items']).
+
+    rw_cnt is the retest sequence number for a given (root_lot_id, wafer_id)
+    ordered by tkout_time (0 = first measurement, 1 = 1st retest, ...).
     """
     cfg = PRODUCT_CONFIG[product]
     rng = np.random.default_rng(cfg["seed"])
@@ -120,6 +125,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     probe_card_id = rng.choice(PROBE_CARD_IDS, size=n_rows)
     eqp_id = rng.choice(EQP_IDS, size=n_rows)
     lot_type = rng.choice(LOT_TYPES, size=n_rows, p=[0.7, 0.15, 0.1, 0.05])
+    rw_cnt = rng.choice(RW_CNT_VALUES, size=n_rows, p=RW_CNT_PROBS)
 
     tkout_time = _random_datetime(
         datetime(2026, 7, 1), datetime(2026, 8, 12, 23, 59, 59), n_rows
@@ -132,6 +138,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
         "probe_card_id": probe_card_id,
         "eqp_id": eqp_id,
         "lot_type": lot_type,
+        "rw_cnt": rw_cnt,
     }
 
     for i in range(1, cfg["n_items"] + 1):
