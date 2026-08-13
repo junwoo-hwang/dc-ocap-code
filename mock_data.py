@@ -111,6 +111,8 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
 
     rw_cnt is the retest sequence number for a given (root_lot_id, wafer_id)
     ordered by tkout_time (0 = first measurement, 1 = 1st retest, ...).
+    Retests (rw_cnt >= 1) don't re-measure every item, so a random subset
+    of item columns is left as NaN on those rows.
     """
     cfg = PRODUCT_CONFIG[product]
     rng = np.random.default_rng(cfg["seed"])
@@ -141,8 +143,19 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
         "rw_cnt": rw_cnt,
     }
 
-    for i in range(1, cfg["n_items"] + 1):
-        data[f"item{i}"] = rng.normal(loc=cfg["center"], scale=cfg["spread"], size=n_rows).round(3)
+    n_items = cfg["n_items"]
+    item_values = rng.normal(loc=cfg["center"], scale=cfg["spread"], size=(n_rows, n_items))
+
+    # retests only re-measure a handful of items, not the full set
+    for row_idx in np.where(rw_cnt >= 1)[0]:
+        n_measured = rng.integers(1, n_items // 2 + 2)
+        measured_cols = rng.choice(n_items, size=n_measured, replace=False)
+        not_measured = np.ones(n_items, dtype=bool)
+        not_measured[measured_cols] = False
+        item_values[row_idx, not_measured] = np.nan
+
+    for i in range(1, n_items + 1):
+        data[f"item{i}"] = item_values[:, i - 1].round(3)
 
     return pd.DataFrame(data)
 
