@@ -88,8 +88,72 @@ def generate_dc(n_rows: int = 300, seed: int | None = 42) -> pd.DataFrame:
     return dc
 
 
+PROBE_CARD_IDS = [f"PC{n:03d}" for n in range(1, 9)]
+EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
+LOT_TYPES = ["MP", "ENG", "MONITOR", "RND"]
+
+# per-product item value profile: (center, spread) so each product's
+# item columns look distinct from one another
+PRODUCT_CONFIG = {
+    "ULY": {"n_items": 18, "center": 50, "spread": 6, "seed": 101},
+    "TTS": {"n_items": 22, "center": 120, "spread": 10, "seed": 102},
+    "SOL": {"n_items": 15, "center": 8, "spread": 1.5, "seed": 103},
+}
+
+
+def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
+    """Generate a mock wide-format probe test dataframe for a single product.
+
+    Columns: root_lot_id, wafer_id, tkout_time, probe_card_id, eqp_id,
+    lot_type, item1..itemN (N = PRODUCT_CONFIG[product]['n_items']).
+    """
+    cfg = PRODUCT_CONFIG[product]
+    rng = np.random.default_rng(cfg["seed"])
+
+    n_lots = max(1, n_rows // 5)
+    root_lot_ids = [f"P{rng.integers(1, 9)}L{rng.integers(1000, 9999)}.{rng.integers(0,999):03d}" for _ in range(n_lots)]
+
+    root_lot_id = rng.choice(root_lot_ids, size=n_rows)
+    wafer_no = rng.integers(1, 26, size=n_rows)
+    wafer_id = [f"{lot}.{w:02d}" for lot, w in zip(root_lot_id, wafer_no)]
+
+    probe_card_id = rng.choice(PROBE_CARD_IDS, size=n_rows)
+    eqp_id = rng.choice(EQP_IDS, size=n_rows)
+    lot_type = rng.choice(LOT_TYPES, size=n_rows, p=[0.7, 0.15, 0.1, 0.05])
+
+    tkout_time = _random_datetime(
+        datetime(2026, 7, 1), datetime(2026, 8, 12, 23, 59, 59), n_rows
+    ).sort_values().reset_index(drop=True)
+
+    data = {
+        "root_lot_id": root_lot_id,
+        "wafer_id": wafer_id,
+        "tkout_time": tkout_time,
+        "probe_card_id": probe_card_id,
+        "eqp_id": eqp_id,
+        "lot_type": lot_type,
+    }
+
+    for i in range(1, cfg["n_items"] + 1):
+        data[f"item{i}"] = rng.normal(loc=cfg["center"], scale=cfg["spread"], size=n_rows).round(3)
+
+    return pd.DataFrame(data)
+
+
+# convenience instances matching the real-world variable names (uly/tts/sol)
+uly = generate_probe_df("ULY")
+tts = generate_probe_df("TTS")
+sol = generate_probe_df("SOL")
+
+
 if __name__ == "__main__":
     dc = generate_dc()
     print(dc.head(10).to_string(index=False))
     print("\nshape:", dc.shape)
     print("\ndtypes:\n", dc.dtypes)
+
+    print("\n" + "=" * 80)
+    for product in ("ULY", "TTS", "SOL"):
+        df = generate_probe_df(product)
+        print(f"\n{product.lower()} shape:", df.shape)
+        print(df.head(3).to_string(index=False))
