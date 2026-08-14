@@ -248,11 +248,18 @@ COMMENT_COLS = ["root_lot_id", "wafer_id", "item_id", "comment", "status", "save
 STATUS_OPTIONS = ["Flow", "Retest", "Hold"]
 
 
-def find_trend_df(root_lot_id: str, item_id: str):
-    for product, tdf in TREND_FRAMES.items():
-        if item_id in tdf.columns and (tdf["root_lot_id"] == root_lot_id).any():
-            return product, tdf
-    return None, None
+def find_trend_df(product: str, item_id: str):
+    """Return the trend dataframe for `product`, or None if unusable.
+
+    The product is known from the hold list's own selection, so it is
+    used directly instead of searching every trend frame for a matching
+    root_lot_id -- a lot that appears under more than one product would
+    otherwise chart the wrong product's data.
+    """
+    tdf = TREND_FRAMES.get(product)
+    if tdf is None or tdf.empty or item_id not in tdf.columns:
+        return None
+    return tdf
 
 
 def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: int,
@@ -266,13 +273,18 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
 
     fig = go.Figure()
 
-    def add_group(grp: pd.DataFrame, color: str, name: str) -> None:
+    def add_group(grp: pd.DataFrame, color: str, name: str, is_bad: bool = False) -> None:
         if grp.empty:
             return
+        marker = (
+            dict(color="red", size=11, line=dict(width=1, color="black"))
+            if is_bad
+            else dict(color=color, size=7)
+        )
         fig.add_trace(
             go.Scatter(
                 x=grp["tkout_time"], y=grp[item_id],
-                mode="markers", marker=dict(color=color, size=7),
+                mode="markers", marker=marker,
                 name=name,
                 customdata=grp[HOVER_COLS].values,
                 hovertemplate=HOVER_TEMPLATE,
@@ -288,28 +300,10 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
             add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], str(cat_val))
 
     if legend_field is None:
-        fig.add_trace(
-            go.Scatter(
-                x=bad["tkout_time"], y=bad[item_id],
-                mode="markers",
-                marker=dict(color="red", size=11, line=dict(width=1, color="black")),
-                name=bad_label,
-                customdata=bad[HOVER_COLS].values,
-                hovertemplate=HOVER_TEMPLATE,
-            )
-        )
+        add_group(bad, None, bad_label, is_bad=True)
     else:
         for cat_val, grp in bad.groupby(legend_field):
-            fig.add_trace(
-                go.Scatter(
-                    x=grp["tkout_time"], y=grp[item_id],
-                    mode="markers",
-                    marker=dict(color="red", size=11, line=dict(width=1, color="black")),
-                    name=f"{bad_label}_{cat_val}",
-                    customdata=grp[HOVER_COLS].values,
-                    hovertemplate=HOVER_TEMPLATE,
-                )
-            )
+            add_group(grp, None, f"{bad_label}_{cat_val}", is_bad=True)
 
     fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
     fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
@@ -327,9 +321,22 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
 
 
 def load_comments() -> pd.DataFrame:
-    if COMMENTS_PATH.exists():
-        return pd.read_csv(COMMENTS_PATH)
-    return pd.DataFrame(columns=COMMENT_COLS)
+    """Read comments.csv, normalized to COMMENT_COLS.
+
+    Missing columns (e.g. a file written before `status` existed) are
+    added as empty, and blank comments read back from CSV as NaN are
+    normalized to "" so they don't render as the string "nan".
+    """
+    if not COMMENTS_PATH.exists():
+        return pd.DataFrame(columns=COMMENT_COLS)
+
+    comments_df = pd.read_csv(COMMENTS_PATH)
+    for col in COMMENT_COLS:
+        if col not in comments_df.columns:
+            comments_df[col] = ""
+    comments_df["comment"] = comments_df["comment"].fillna("")
+    comments_df["status"] = comments_df["status"].fillna("")
+    return comments_df
 
 
 def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: str, status: str) -> None:
@@ -399,7 +406,8 @@ with left:
 with right:
     st.subheader("Item Trend")
     sel = dc_sorted.iloc[selected_rows[0]] if selected_rows else None
-    product, tdf = find_trend_df(sel["root_lot_id"], sel["item_id"]) if sel is not None else (None, None)
+    product = selected_product
+    tdf = find_trend_df(product, sel["item_id"]) if sel is not None else None
 
     with st.container(height=TREND_HEIGHT, border=True):
         if sel is None:
