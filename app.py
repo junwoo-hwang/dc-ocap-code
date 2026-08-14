@@ -238,8 +238,14 @@ HOVER_TEMPLATE = (
     "rw_cnt=%{customdata[4]}<extra></extra>"
 )
 
+CATEGORY_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
+    "#17becf", "#bcbd22", "#7f7f7f", "#e377c2", "#aec7e8",
+]
+
 COMMENTS_PATH = Path(__file__).parent / "comments.csv"
-COMMENT_COLS = ["root_lot_id", "wafer_id", "item_id", "comment", "saved_at"]
+COMMENT_COLS = ["root_lot_id", "wafer_id", "item_id", "comment", "status", "saved_at"]
+STATUS_OPTIONS = ["Flow", "Retest", "Hold"]
 
 
 def find_trend_df(root_lot_id: str, item_id: str):
@@ -263,39 +269,50 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: st
 
     fig = go.Figure()
 
-    if legend_field is None:
-        colors = ["dimgray" if lot == bad_root_lot_id else "lightgray" for lot in others["root_lot_id"]]
+    def add_group(grp: pd.DataFrame, color: str, name: str) -> None:
+        if grp.empty:
+            return
         fig.add_trace(
             go.Scatter(
-                x=others["tkout_time"], y=others[item_id],
-                mode="markers", marker=dict(color=colors, size=7),
-                name="other",
-                customdata=others[HOVER_COLS].values,
+                x=grp["tkout_time"], y=grp[item_id],
+                mode="markers", marker=dict(color=color, size=7),
+                name=name,
+                customdata=grp[HOVER_COLS].values,
+                hovertemplate=HOVER_TEMPLATE,
+            )
+        )
+
+    if legend_field is None:
+        same_lot_mask = others["root_lot_id"] == bad_root_lot_id
+        add_group(others[~same_lot_mask], "lightgray", "other")
+        add_group(others[same_lot_mask], "dimgray", bad_root_lot_id)
+    else:
+        for i, (cat_val, grp) in enumerate(others.groupby(legend_field)):
+            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], f"{legend_field}={cat_val}")
+
+    if legend_field is None:
+        fig.add_trace(
+            go.Scatter(
+                x=bad["tkout_time"], y=bad[item_id],
+                mode="markers",
+                marker=dict(color="red", size=11, line=dict(width=1, color="black")),
+                name=bad_label,
+                customdata=bad[HOVER_COLS].values,
                 hovertemplate=HOVER_TEMPLATE,
             )
         )
     else:
-        for cat_val, grp in others.groupby(legend_field):
+        for cat_val, grp in bad.groupby(legend_field):
             fig.add_trace(
                 go.Scatter(
                     x=grp["tkout_time"], y=grp[item_id],
-                    mode="markers", marker=dict(color="gray", size=7),
-                    name=f"{legend_field}={cat_val}",
+                    mode="markers",
+                    marker=dict(color="red", size=11, line=dict(width=1, color="black")),
+                    name=f"{bad_label}_{cat_val}",
                     customdata=grp[HOVER_COLS].values,
                     hovertemplate=HOVER_TEMPLATE,
                 )
             )
-
-    fig.add_trace(
-        go.Scatter(
-            x=bad["tkout_time"], y=bad[item_id],
-            mode="markers",
-            marker=dict(color="red", size=11, line=dict(width=1, color="black")),
-            name=bad_label,
-            customdata=bad[HOVER_COLS].values,
-            hovertemplate=HOVER_TEMPLATE,
-        )
-    )
 
     fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
     fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
@@ -318,7 +335,7 @@ def load_comments() -> pd.DataFrame:
     return pd.DataFrame(columns=COMMENT_COLS)
 
 
-def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: str) -> None:
+def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: str, status: str) -> None:
     comments_df = load_comments()
     mask = (
         (comments_df["root_lot_id"] == root_lot_id)
@@ -328,11 +345,12 @@ def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: st
     now = datetime.now().isoformat(timespec="seconds")
     if mask.any():
         comments_df.loc[mask, "comment"] = comment_text
+        comments_df.loc[mask, "status"] = status
         comments_df.loc[mask, "saved_at"] = now
     else:
         new_row = pd.DataFrame([{
             "root_lot_id": root_lot_id, "wafer_id": wafer_id, "item_id": item_id,
-            "comment": comment_text, "saved_at": now,
+            "comment": comment_text, "status": status, "saved_at": now,
         }])
         comments_df = pd.concat([comments_df, new_row], ignore_index=True)
     comments_df.to_csv(COMMENTS_PATH, index=False)
@@ -409,14 +427,24 @@ with right:
                 & (comments_df["item_id"] == sel["item_id"])
             )
             existing_comment = comments_df.loc[mask, "comment"].iloc[-1] if mask.any() else ""
+            existing_status = comments_df.loc[mask, "status"].iloc[-1] if mask.any() else None
+            existing_status = existing_status if existing_status in STATUS_OPTIONS else None
             comment_key = f"{sel['root_lot_id']}_{sel['wafer_id']}_{sel['item_id']}"
 
             comment_text = st.text_area(
                 "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
             )
-            btn_spacer, btn_col = st.columns([4, 1])
-            with btn_col:
+            row_spacer, row_status, row_save = st.columns([3, 3, 1])
+            with row_status:
+                status_choice = st.segmented_control(
+                    "Status", STATUS_OPTIONS, default=existing_status,
+                    label_visibility="collapsed", key=f"status_input_{comment_key}",
+                )
+            with row_save:
                 save_clicked = st.button("저장", key=f"save_btn_{comment_key}")
             if save_clicked:
-                save_comment(sel["root_lot_id"], sel["wafer_id"], sel["item_id"], comment_text)
-                st.success("저장되었습니다.")
+                if status_choice is None:
+                    st.error("Flow / Retest / Hold 중 하나를 선택해주세요.")
+                else:
+                    save_comment(sel["root_lot_id"], sel["wafer_id"], sel["item_id"], comment_text, status_choice)
+                    st.success("저장되었습니다.")
