@@ -382,7 +382,9 @@ with right:
         elif tdf is None:
             st.warning("매칭되는 trend 데이터를 찾지 못했습니다.")
         else:
-            legend_label = st.selectbox("Legend 기준", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
+            legend_spacer, legend_col = st.columns([4, 1])
+            with legend_col:
+                legend_label = st.selectbox("Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
             legend_field = LEGEND_FIELD_OPTIONS[legend_label]
 
             fig = build_scatter(
@@ -412,6 +414,9 @@ with right:
             comment_text = st.text_area(
                 "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
             )
-            if st.button("저장", key=f"save_btn_{comment_key}"):
+            btn_spacer, btn_col = st.columns([4, 1])
+            with btn_col:
+                save_clicked = st.button("저장", key=f"save_btn_{comment_key}")
+            if save_clicked:
                 save_comment(sel["root_lot_id"], sel["wafer_id"], sel["item_id"], comment_text)
                 st.success("저장되었습니다.")
