@@ -52,7 +52,8 @@ def wafer_no(wafer_id: str) -> int:
 
 
 def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: str,
-                   legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float) -> go.Figure:
+                   legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float,
+                   chart_height: int) -> go.Figure:
     plot_df = trend_df.dropna(subset=[item_id])
     others = plot_df[plot_df["wafer_id"] != bad_wafer_id]
     bad = plot_df[plot_df["wafer_id"] == bad_wafer_id]
@@ -103,8 +104,8 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: st
         xaxis_title="tkout_time",
         yaxis_title=item_id,
         legend_title=legend_field or "Legend",
-        height=430,
-        margin=dict(t=40),
+        height=chart_height,
+        margin=dict(t=30, b=30),
     )
     return fig
 
@@ -137,6 +138,10 @@ def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: st
 
 st.title("Hold 현황 대시보드")
 
+PANEL_HEIGHT = 650
+TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
+COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
+
 left, right = st.columns([2, 3])
 
 dc_sorted = dc.sort_values("hold_time", ascending=False).reset_index(drop=True)
@@ -150,20 +155,20 @@ with left:
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        height=650,
+        height=PANEL_HEIGHT,
         key="dc_table",
     )
     selected_rows = event.selection.rows if event and event.selection else []
 
 with right:
     st.subheader("Item Trend")
-    if not selected_rows:
-        st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
-    else:
-        sel = dc_sorted.iloc[selected_rows[0]]
-        product, tdf = find_trend_df(sel["root_lot_id"], sel["item_id"])
+    sel = dc_sorted.iloc[selected_rows[0]] if selected_rows else None
+    product, tdf = find_trend_df(sel["root_lot_id"], sel["item_id"]) if sel is not None else (None, None)
 
-        if tdf is None:
+    with st.container(height=TREND_HEIGHT, border=True):
+        if sel is None:
+            st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
+        elif tdf is None:
             st.warning("매칭되는 trend 데이터를 찾지 못했습니다.")
         else:
             legend_label = st.selectbox("Legend 기준", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
@@ -172,6 +177,7 @@ with right:
             fig = build_scatter(
                 tdf, sel["item_id"], sel["root_lot_id"], sel["wafer_id"], legend_field,
                 sel["ucl"], sel["lcl"], sel["usl"], sel["lsl"],
+                chart_height=TREND_HEIGHT - 190,
             )
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
@@ -179,7 +185,10 @@ with right:
                 f"wafer_id: {sel['wafer_id']} · item: {sel['item_id']}"
             )
 
-            st.markdown("---")
+    with st.container(height=COMMENT_HEIGHT, border=True):
+        if sel is None or tdf is None:
+            st.caption("Comment")
+        else:
             comments_df = load_comments()
             mask = (
                 (comments_df["root_lot_id"] == sel["root_lot_id"])
@@ -190,7 +199,7 @@ with right:
             comment_key = f"{sel['root_lot_id']}_{sel['wafer_id']}_{sel['item_id']}"
 
             comment_text = st.text_area(
-                "Comment", value=existing_comment, height=110, key=f"comment_input_{comment_key}"
+                "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
             )
             if st.button("저장", key=f"save_btn_{comment_key}"):
                 save_comment(sel["root_lot_id"], sel["wafer_id"], sel["item_id"], comment_text)
