@@ -346,12 +346,20 @@ COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
 
 left, right = st.columns([2, 3])
 
-dc = pd.concat([dc_uly, dc_sol, dc_tts], ignore_index=True)
-dc_sorted = dc.sort_values("hold_time", ascending=False).reset_index(drop=True)
+PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
 display_cols = ["hold_time", "root_lot_id", "wafer_id", "item_id", "hold_inform", "line_id", "process_id"]
 
 with left:
-    st.subheader("Hold 리스트 (최근순)")
+    title_col, switch_col = st.columns([2, 2])
+    with title_col:
+        st.subheader("DC OCAP List")
+    with switch_col:
+        selected_product = st.segmented_control(
+            "제품", list(PRODUCT_DC.keys()), default="ULY", label_visibility="collapsed", key="product_switch"
+        )
+    selected_product = selected_product or "ULY"
+
+    dc_sorted = PRODUCT_DC[selected_product].sort_values("hold_time", ascending=False).reset_index(drop=True)
     event = st.dataframe(
         dc_sorted[display_cols],
         use_container_width=True,
@@ -359,7 +367,7 @@ with left:
         on_select="rerun",
         selection_mode="single-row",
         height=PANEL_HEIGHT,
-        key="dc_table",
+        key=f"dc_table_{selected_product}",
     )
     selected_rows = event.selection.rows if event and event.selection else []
 
