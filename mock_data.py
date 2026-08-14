@@ -1,9 +1,17 @@
 """
 Mock data generator for the OCAP dashboard.
 
-`dc` mimics the hold-event dataframe pulled from the datalake:
-when a product/lot gets put on HOLD due to a measurement value
-being out of spec/control, one row is recorded here.
+`dc` mimics the hold-event dataframe pulled from the datalake: when a
+product/lot gets put on HOLD due to a measurement value being out of
+spec/control, one row is recorded here.
+
+`uly` / `tts` / `sol` mimic the per-product wide-format probe test
+("trend") dataframes: one row per wafer measurement, item1..itemN
+holding the measured values.
+
+`dc` rows are sampled from the trend dataframes (same root_lot_id /
+wafer_id / item column) so the dashboard can actually look up a hold
+event's trend history.
 
 Real data source and pull logic are internal/confidential; this module
 only produces structurally-similar synthetic data for local dev of the
@@ -15,11 +23,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-RNG = np.random.default_rng(42)
-
 LINE_IDS = ["M14", "M16", "L1", "L2"]
 PROCESS_IDS = ["PHOTO", "ETCH", "DEP", "CMP", "DIFF", "IMP", "CLEAN"]
-ITEM_IDS = ["THICKNESS", "CD", "OVERLAY", "RESISTANCE", "PARTICLE", "STRESS", "PROFILE"]
 HOLD_REASONS = [
     "OOC (Out of Control)",
     "SPEC OUT (USL Exceed)",
@@ -29,64 +34,6 @@ HOLD_REASONS = [
     "SUDDEN SHIFT",
     "MEASUREMENT DELAY",
 ]
-
-
-def _random_datetime(start: datetime, end: datetime, size: int) -> pd.Series:
-    delta_seconds = int((end - start).total_seconds())
-    offsets = RNG.integers(0, delta_seconds, size=size)
-    return pd.Series([start + timedelta(seconds=int(s)) for s in offsets])
-
-
-def generate_dc(n_rows: int = 300, seed: int | None = 42) -> pd.DataFrame:
-    """Generate a mock `dc` (hold event) dataframe with n_rows rows."""
-    rng = np.random.default_rng(seed)
-
-    n_lots = max(1, n_rows // 5)
-    root_lot_ids = [f"P{rng.integers(1, 9)}L{rng.integers(1000, 9999)}.{rng.integers(0,999):03d}" for _ in range(n_lots)]
-
-    line_id = rng.choice(LINE_IDS, size=n_rows)
-    process_id = rng.choice(PROCESS_IDS, size=n_rows)
-    item_id = rng.choice(ITEM_IDS, size=n_rows)
-    sub_item_id = [f"{it}_{rng.integers(1,4)}" for it in item_id]
-    hold_inform = rng.choice(HOLD_REASONS, size=n_rows)
-
-    root_lot_id = rng.choice(root_lot_ids, size=n_rows)
-    wafer_no = rng.integers(1, 26, size=n_rows)  # 25 wafers per lot typical
-    wafer_id = [f"{lot}.{w:02d}" for lot, w in zip(root_lot_id, wafer_no)]
-
-    step_seq = rng.integers(10, 500, size=n_rows)
-
-    # spec/control limits: usl/lsl wider than ucl/lcl, centered around a base value
-    base = rng.normal(loc=100, scale=15, size=n_rows)
-    usl = base + rng.uniform(8, 15, size=n_rows)
-    lsl = base - rng.uniform(8, 15, size=n_rows)
-    ucl = base + rng.uniform(3, 7, size=n_rows)
-    lcl = base - rng.uniform(3, 7, size=n_rows)
-
-    hold_time = _random_datetime(
-        datetime(2026, 7, 1), datetime(2026, 8, 12, 23, 59, 59), n_rows
-    ).sort_values().reset_index(drop=True)
-
-    dc = pd.DataFrame(
-        {
-            "root_lot_id": root_lot_id,
-            "wafer_id": wafer_id,
-            "hold_time": hold_time,
-            "item_id": item_id,
-            "hold_inform": hold_inform,
-            "ucl": ucl.round(3),
-            "lcl": lcl.round(3),
-            "usl": usl.round(3),
-            "lsl": lsl.round(3),
-            "step_seq": step_seq,
-            "line_id": line_id,
-            "process_id": process_id,
-            "sub_item_id": sub_item_id,
-        }
-    )
-
-    return dc
-
 
 PROBE_CARD_IDS = [f"PC{n:03d}" for n in range(1, 9)]
 EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
@@ -101,6 +48,12 @@ PRODUCT_CONFIG = {
     "TTS": {"n_items": 22, "center": 120, "spread": 10, "seed": 102},
     "SOL": {"n_items": 15, "center": 8, "spread": 1.5, "seed": 103},
 }
+
+
+def _random_datetime(rng: np.random.Generator, start: datetime, end: datetime, size: int) -> pd.Series:
+    delta_seconds = int((end - start).total_seconds())
+    offsets = rng.integers(0, delta_seconds, size=size)
+    return pd.Series([start + timedelta(seconds=int(s)) for s in offsets])
 
 
 def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
@@ -130,7 +83,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     rw_cnt = rng.choice(RW_CNT_VALUES, size=n_rows, p=RW_CNT_PROBS)
 
     tkout_time = _random_datetime(
-        datetime(2026, 7, 1), datetime(2026, 8, 12, 23, 59, 59), n_rows
+        rng, datetime(2026, 7, 1), datetime(2026, 8, 12, 23, 59, 59), n_rows
     ).sort_values().reset_index(drop=True)
 
     data = {
@@ -165,15 +118,85 @@ uly = generate_probe_df("ULY")
 tts = generate_probe_df("TTS")
 sol = generate_probe_df("SOL")
 
+TREND_FRAMES = {"ULY": uly, "TTS": tts, "SOL": sol}
+
+
+def generate_dc(trend_frames: dict = TREND_FRAMES, n_rows: int = 150, seed: int | None = 42) -> pd.DataFrame:
+    """Generate a mock `dc` (hold event) dataframe with n_rows rows.
+
+    Each hold event is tied to a real (root_lot_id, wafer_id, item column)
+    combination sampled from `trend_frames`, so it can be looked up in the
+    corresponding trend dataframe on the dashboard.
+    """
+    rng = np.random.default_rng(seed)
+    products = list(trend_frames.keys())
+
+    rows = []
+    for _ in range(n_rows):
+        product = rng.choice(products)
+        tdf = trend_frames[product]
+        src = tdf.iloc[rng.integers(0, len(tdf))]
+        item_cols = [c for c in tdf.columns if c.startswith("item")]
+        item_id = rng.choice(item_cols)
+
+        cfg = PRODUCT_CONFIG[product]
+        spread = cfg["spread"]
+        base = rng.normal(loc=cfg["center"], scale=spread)
+        usl = base + rng.uniform(spread * 1.5, spread * 2.5)
+        lsl = base - rng.uniform(spread * 1.5, spread * 2.5)
+        ucl = base + rng.uniform(spread * 0.6, spread * 1.2)
+        lcl = base - rng.uniform(spread * 0.6, spread * 1.2)
+
+        rows.append(
+            {
+                "root_lot_id": src["root_lot_id"],
+                "wafer_id": src["wafer_id"],
+                "item_id": item_id,
+                "hold_inform": rng.choice(HOLD_REASONS),
+                "ucl": round(ucl, 3),
+                "lcl": round(lcl, 3),
+                "usl": round(usl, 3),
+                "lsl": round(lsl, 3),
+                "step_seq": int(rng.integers(10, 500)),
+                "line_id": rng.choice(LINE_IDS),
+                "process_id": rng.choice(PROCESS_IDS),
+                "sub_item_id": f"{item_id}_{rng.integers(1, 4)}",
+            }
+        )
+
+    dc = pd.DataFrame(rows)
+    dc["hold_time"] = _random_datetime(
+        rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), n_rows
+    ).sort_values().reset_index(drop=True)
+
+    return dc[
+        [
+            "root_lot_id",
+            "wafer_id",
+            "hold_time",
+            "item_id",
+            "hold_inform",
+            "ucl",
+            "lcl",
+            "usl",
+            "lsl",
+            "step_seq",
+            "line_id",
+            "process_id",
+            "sub_item_id",
+        ]
+    ]
+
+
+dc = generate_dc()
+
 
 if __name__ == "__main__":
-    dc = generate_dc()
     print(dc.head(10).to_string(index=False))
-    print("\nshape:", dc.shape)
+    print("\ndc shape:", dc.shape)
     print("\ndtypes:\n", dc.dtypes)
 
     print("\n" + "=" * 80)
-    for product in ("ULY", "TTS", "SOL"):
-        df = generate_probe_df(product)
-        print(f"\n{product.lower()} shape:", df.shape)
+    for name, df in TREND_FRAMES.items():
+        print(f"\n{name.lower()} shape:", df.shape)
         print(df.head(3).to_string(index=False))
