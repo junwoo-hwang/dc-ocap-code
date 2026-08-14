@@ -95,8 +95,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     span_seconds = int((end_dt - start_dt).total_seconds())
 
     rows = []
-    for lot, wafer_no in base_wafers:
-        wafer_id = f"{lot}.{wafer_no:02d}"
+    for lot, wafer_id in base_wafers:
         tkout_time = start_dt + timedelta(seconds=int(rng.integers(0, span_seconds)))
 
         chain_len = 1
@@ -229,13 +228,14 @@ LEGEND_FIELD_OPTIONS = {
     "rw_cnt": "rw_cnt",
 }
 
-HOVER_COLS = ["wafer_id", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
+HOVER_COLS = ["root_lot_id", "wafer_id", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
 HOVER_TEMPLATE = (
-    "wafer_id=%{customdata[0]}<br>"
-    "probe_card_id=%{customdata[1]}<br>"
-    "eqp_id=%{customdata[2]}<br>"
-    "lot_type=%{customdata[3]}<br>"
-    "rw_cnt=%{customdata[4]}<extra></extra>"
+    "root_lot_id=%{customdata[0]}<br>"
+    "wafer_id=%{customdata[1]}<br>"
+    "probe_card_id=%{customdata[2]}<br>"
+    "eqp_id=%{customdata[3]}<br>"
+    "lot_type=%{customdata[4]}<br>"
+    "rw_cnt=%{customdata[5]}<extra></extra>"
 )
 
 CATEGORY_COLORS = [
@@ -255,17 +255,14 @@ def find_trend_df(root_lot_id: str, item_id: str):
     return None, None
 
 
-def wafer_no(wafer_id: str) -> int:
-    return int(wafer_id.split(".")[-1])
-
-
-def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: str,
+def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: int,
                    legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float,
                    chart_height: int) -> go.Figure:
     plot_df = trend_df.dropna(subset=[item_id])
-    others = plot_df[plot_df["wafer_id"] != bad_wafer_id]
-    bad = plot_df[plot_df["wafer_id"] == bad_wafer_id]
-    bad_label = f"{bad_root_lot_id} #{wafer_no(bad_wafer_id)}"
+    is_bad = (plot_df["root_lot_id"] == bad_root_lot_id) & (plot_df["wafer_id"] == bad_wafer_id)
+    others = plot_df[~is_bad]
+    bad = plot_df[is_bad]
+    bad_label = f"{bad_root_lot_id} #{bad_wafer_id}"
 
     fig = go.Figure()
 
@@ -288,7 +285,7 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: st
         add_group(others[same_lot_mask], "dimgray", bad_root_lot_id)
     else:
         for i, (cat_val, grp) in enumerate(others.groupby(legend_field)):
-            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], f"{legend_field}={cat_val}")
+            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], str(cat_val))
 
     if legend_field is None:
         fig.add_trace(
