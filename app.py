@@ -1,21 +1,223 @@
 """OCAP hold dashboard.
 
-Left: dc (hold events), newest first, single-row selectable.
+Left: hold list (dc_uly + dc_sol + dc_tts combined), newest first,
+single-row selectable.
 Right (top 2/3): scatter of the selected hold's item across its trend
-dataframe (uly/tts/sol), with UCL/LCL (blue) and USL/LSL (red) reference
-lines. The held wafer is highlighted red ("{root_lot_id} #{wafer_no}"
-legend entry); same-lot points are a darker gray than other lots.
+dataframe (uly_trend / sol_trend / tts_trend), with UCL/LCL (blue) and
+USL/LSL (red) reference lines. The held wafer is highlighted red
+("{root_lot_id} #{wafer_no}" legend entry); same-lot points are a
+darker gray than other lots.
 Right (bottom 1/3): a comment box for the selected hold, saved to disk.
+
+======================================================================
+DATA PREP (mock — stands in for the real datalake pull, which can't be
+shared here). Produces the final dc_uly/dc_sol/dc_tts and
+uly_trend/sol_trend/tts_trend dataframes that the real pipeline already
+has ready. Everything from the "여기부터 streamlit" marker down is the
+actual dashboard and doesn't need to change when this section is
+swapped for the real data pull.
+======================================================================
 """
 
-from datetime import datetime
+import string
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+
+LOT_ID_CHARS = list(string.ascii_uppercase + string.digits)
+
+LINE_IDS = ["M14", "M16", "L1", "L2"]
+HOLD_REASONS = [
+    "OOC (Out of Control)",
+    "SPEC OUT (USL Exceed)",
+    "SPEC OUT (LSL Exceed)",
+    "EQP ALARM",
+    "TREND WARNING (7 POINT RUN)",
+    "SUDDEN SHIFT",
+    "MEASUREMENT DELAY",
+]
+
+PROBE_CARD_IDS = [f"PC{n:03d}" for n in range(1, 9)]
+EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
+LOT_TYPES = ["MP", "ENG", "MONITOR", "RND"]
+RW_CNT_VALUES = [0, 1, 2, 3, 4, 5]
+
+# product is identified by process_id: KNNU=uly, KNJO=sol, KNIK=tts
+PRODUCT_CONFIG = {
+    "ULY": {"n_items": 18, "center": 50, "spread": 6, "seed": 101, "process_id": "KNNU"},
+    "SOL": {"n_items": 15, "center": 8, "spread": 1.5, "seed": 103, "process_id": "KNJO"},
+    "TTS": {"n_items": 22, "center": 120, "spread": 10, "seed": 102, "process_id": "KNIK"},
+}
+
+
+def _random_datetime(rng: np.random.Generator, start: datetime, end: datetime, size: int) -> pd.Series:
+    delta_seconds = int((end - start).total_seconds())
+    offsets = rng.integers(0, delta_seconds, size=size)
+    return pd.Series([start + timedelta(seconds=int(s)) for s in offsets])
+
+
+def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
+    """Generate a mock wide-format probe test ("trend") dataframe for a product.
+
+    Columns: root_lot_id, wafer_id, tkout_time, probe_card_id, eqp_id,
+    lot_type, rw_cnt, item1..itemN (N = PRODUCT_CONFIG[product]['n_items']).
+
+    rw_cnt is the retest sequence number: for a given (root_lot_id, wafer_id)
+    group sorted by tkout_time, the first row is rw_cnt=0, and each
+    subsequent row (an actual retest of that same wafer, at a later
+    tkout_time) increments it by 1. A wafer only appears more than once
+    when it was genuinely retested. Retests (rw_cnt >= 1) don't re-measure
+    every item, so a random subset of item columns is left as NaN on those
+    rows; rw_cnt=0 rows always have every item filled.
+    """
+    cfg = PRODUCT_CONFIG[product]
+    rng = np.random.default_rng(cfg["seed"])
+    n_items = cfg["n_items"]
+
+    # ~19% chance a wafer gets one more retest than its previous test;
+    # this reproduces the ~80/15/3/1.5/0.4/0.1% split across rw_cnt 0-5
+    CONTINUE_PROB = 0.19
+    EXPECTED_CHAIN_LEN = 1.234  # sum_{k=0..5} CONTINUE_PROB**k
+    n_base = max(1, round(n_rows / EXPECTED_CHAIN_LEN))
+
+    n_lots = max(1, n_base // 5)
+    root_lot_ids = set()
+    while len(root_lot_ids) < n_lots:
+        root_lot_ids.add("".join(rng.choice(LOT_ID_CHARS, size=5)))
+    root_lot_ids = list(root_lot_ids)
+    wafer_pool = [(lot, w) for lot in root_lot_ids for w in range(1, 26)]
+    rng.shuffle(wafer_pool)
+    base_wafers = wafer_pool[: min(n_base, len(wafer_pool))]
+
+    start_dt = datetime(2026, 7, 1)
+    end_dt = datetime(2026, 8, 12, 23, 59, 59)
+    span_seconds = int((end_dt - start_dt).total_seconds())
+
+    rows = []
+    for lot, wafer_no in base_wafers:
+        wafer_id = f"{lot}.{wafer_no:02d}"
+        tkout_time = start_dt + timedelta(seconds=int(rng.integers(0, span_seconds)))
+
+        chain_len = 1
+        while chain_len < len(RW_CNT_VALUES) and rng.random() < CONTINUE_PROB:
+            chain_len += 1
+
+        for rw in range(chain_len):
+            if rw > 0:
+                tkout_time += timedelta(hours=int(rng.integers(2, 72)))
+
+            if rw == 0:
+                values = rng.normal(loc=cfg["center"], scale=cfg["spread"], size=n_items)
+            else:
+                values = np.full(n_items, np.nan)
+                n_measured = rng.integers(1, n_items // 2 + 2)
+                measured_cols = rng.choice(n_items, size=n_measured, replace=False)
+                values[measured_cols] = rng.normal(loc=cfg["center"], scale=cfg["spread"], size=n_measured)
+
+            row = {
+                "root_lot_id": lot,
+                "wafer_id": wafer_id,
+                "tkout_time": tkout_time,
+                "probe_card_id": rng.choice(PROBE_CARD_IDS),
+                "eqp_id": rng.choice(EQP_IDS),
+                "lot_type": rng.choice(LOT_TYPES, p=[0.7, 0.15, 0.1, 0.05]),
+                "rw_cnt": rw,
+            }
+            for i in range(n_items):
+                row[f"item{i + 1}"] = round(float(values[i]), 3) if not np.isnan(values[i]) else np.nan
+            rows.append(row)
+
+    return pd.DataFrame(rows).sort_values("tkout_time").reset_index(drop=True)
+
+
+def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 50, seed: int | None = None) -> pd.DataFrame:
+    """Generate a mock hold-event dataframe for a single product.
+
+    Each hold event is tied to a real (root_lot_id, wafer_id, item column)
+    combination sampled from `trend_df` (only rw_cnt=0 rows, since those
+    have every item measured), so it can be looked up in the trend
+    dataframe on the dashboard. process_id is fixed to the product's code.
+    """
+    rng = np.random.default_rng(seed)
+    cfg = PRODUCT_CONFIG[product]
+    base_rows = trend_df[trend_df["rw_cnt"] == 0]
+    item_cols = [c for c in trend_df.columns if c.startswith("item")]
+
+    rows = []
+    for _ in range(n_rows):
+        src = base_rows.iloc[rng.integers(0, len(base_rows))]
+        item_id = rng.choice(item_cols)
+
+        spread = cfg["spread"]
+        base = rng.normal(loc=cfg["center"], scale=spread)
+        usl = base + rng.uniform(spread * 1.5, spread * 2.5)
+        lsl = base - rng.uniform(spread * 1.5, spread * 2.5)
+        ucl = base + rng.uniform(spread * 0.6, spread * 1.2)
+        lcl = base - rng.uniform(spread * 0.6, spread * 1.2)
+
+        rows.append(
+            {
+                "root_lot_id": src["root_lot_id"],
+                "wafer_id": src["wafer_id"],
+                "item_id": item_id,
+                "hold_inform": rng.choice(HOLD_REASONS),
+                "ucl": round(ucl, 3),
+                "lcl": round(lcl, 3),
+                "usl": round(usl, 3),
+                "lsl": round(lsl, 3),
+                "step_seq": int(rng.integers(10, 500)),
+                "line_id": rng.choice(LINE_IDS),
+                "process_id": cfg["process_id"],
+                "sub_item_id": f"{item_id}_{rng.integers(1, 4)}",
+            }
+        )
+
+    dc_df = pd.DataFrame(rows)
+    dc_df["hold_time"] = _random_datetime(
+        rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), n_rows
+    ).sort_values().reset_index(drop=True)
+
+    return dc_df[
+        [
+            "root_lot_id",
+            "wafer_id",
+            "hold_time",
+            "item_id",
+            "hold_inform",
+            "ucl",
+            "lcl",
+            "usl",
+            "lsl",
+            "step_seq",
+            "line_id",
+            "process_id",
+            "sub_item_id",
+        ]
+    ]
+
+
+# per-product trend ("uly_trend" style naming, matches the real dataframes)
+uly_trend = generate_probe_df("ULY")
+sol_trend = generate_probe_df("SOL")
+tts_trend = generate_probe_df("TTS")
+
+TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+
+# per-product hold events ("dc_uly" style naming, matches the real dataframes)
+dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
+dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
+dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
+
+
+# ======================================================================
+# 여기부터 streamlit
+# ======================================================================
+
 from pathlib import Path
 
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
-from mock_data import TREND_FRAMES, dc
 
 st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
 
@@ -144,6 +346,7 @@ COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
 
 left, right = st.columns([2, 3])
 
+dc = pd.concat([dc_uly, dc_sol, dc_tts], ignore_index=True)
 dc_sorted = dc.sort_values("hold_time", ascending=False).reset_index(drop=True)
 display_cols = ["hold_time", "root_lot_id", "wafer_id", "item_id", "hold_inform", "line_id", "process_id"]
 
