@@ -361,8 +361,12 @@ COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
 
 left, right = st.columns([2, 3])
 
-PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+DC_COLS = [
+    "root_lot_id", "wafer_id", "hold_time", "item_id", "hold_inform",
+    "ucl", "lcl", "usl", "lsl", "step_seq", "line_id", "process_id", "sub_item_id",
+]
 display_cols = ["hold_time", "root_lot_id", "wafer_id", "item_id", "hold_inform", "line_id", "process_id"]
+PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
 
 with left:
     title_col, switch_col = st.columns([2, 2])
@@ -374,7 +378,13 @@ with left:
         )
     selected_product = selected_product or "ULY"
 
-    dc_sorted = PRODUCT_DC[selected_product].sort_values("hold_time", ascending=False).reset_index(drop=True)
+    dc_df = PRODUCT_DC[selected_product]
+    if dc_df is None or dc_df.empty or "hold_time" not in dc_df.columns:
+        dc_sorted = pd.DataFrame(columns=DC_COLS)
+        st.caption(f"{selected_product}: 현재 hold 건이 없습니다.")
+    else:
+        dc_sorted = dc_df.sort_values("hold_time", ascending=False).reset_index(drop=True)
+
     event = st.dataframe(
         dc_sorted[display_cols],
         use_container_width=True,
