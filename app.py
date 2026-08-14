@@ -387,7 +387,7 @@ with left:
 
     event = st.dataframe(
         dc_sorted[display_cols],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -417,7 +417,7 @@ with right:
                 sel["ucl"], sel["lcl"], sel["usl"], sel["lsl"],
                 chart_height=TREND_HEIGHT - 190,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption(
                 f"제품: {product} · root_lot_id: {sel['root_lot_id']} · "
                 f"wafer_id: {sel['wafer_id']} · item: {sel['item_id']}"
