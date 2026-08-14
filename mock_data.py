@@ -18,10 +18,13 @@ only produces structurally-similar synthetic data for local dev of the
 Streamlit dashboard.
 """
 
+import string
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+
+LOT_ID_CHARS = list(string.ascii_uppercase + string.digits)
 
 LINE_IDS = ["M14", "M16", "L1", "L2"]
 PROCESS_IDS = ["PHOTO", "ETCH", "DEP", "CMP", "DIFF", "IMP", "CLEAN"]
@@ -80,7 +83,10 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     n_base = max(1, round(n_rows / EXPECTED_CHAIN_LEN))
 
     n_lots = max(1, n_base // 5)
-    root_lot_ids = [f"P{rng.integers(1, 9)}L{rng.integers(1000, 9999)}.{rng.integers(0,999):03d}" for _ in range(n_lots)]
+    root_lot_ids = set()
+    while len(root_lot_ids) < n_lots:
+        root_lot_ids.add("".join(rng.choice(LOT_ID_CHARS, size=5)))
+    root_lot_ids = list(root_lot_ids)
     wafer_pool = [(lot, w) for lot in root_lot_ids for w in range(1, 26)]
     rng.shuffle(wafer_pool)
     base_wafers = wafer_pool[: min(n_base, len(wafer_pool))]
