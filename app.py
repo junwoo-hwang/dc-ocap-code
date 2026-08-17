@@ -449,14 +449,17 @@ with right:
             comment_text = st.text_area(
                 "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
             )
-            row_spacer, row_status, row_save = st.columns([3, 3, 1])
+            # status sits just left of the save button, one button-width apart;
+            # the save button stretches so its right edge lines up with the
+            # comment box above it
+            row_spacer, row_status, row_save = st.columns([5.9, 3, 1])
             with row_status:
                 status_choice = st.segmented_control(
                     "Status", STATUS_OPTIONS, default=existing_status,
                     label_visibility="collapsed", key=f"status_input_{comment_key}",
                 )
             with row_save:
-                save_clicked = st.button("저장", key=f"save_btn_{comment_key}")
+                save_clicked = st.button("저장", key=f"save_btn_{comment_key}", width="stretch")
             if save_clicked:
                 if status_choice is None:
                     st.error("Flow / Retest / Hold 중 하나를 선택해주세요.")
