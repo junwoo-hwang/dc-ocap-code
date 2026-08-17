@@ -1,29 +1,44 @@
 """OCAP hold dashboard.
 
-Left: hold list (dc_uly + dc_sol + dc_tts combined), newest first,
-single-row selectable.
-Right (top 2/3): scatter of the selected hold's item across its trend
-dataframe (uly_trend / sol_trend / tts_trend), with UCL/LCL (blue) and
-USL/LSL (red) reference lines. The held wafer is highlighted red
-("{root_lot_id} #{wafer_no}" legend entry); same-lot points are a
-darker gray than other lots.
-Right (bottom 1/3): a comment box for the selected hold, saved to disk.
+Left: the selected product's hold list (dc_uly / dc_sol / dc_tts),
+newest first, single-row selectable, with a ULY/SOL/TTS switch.
+Right (top 2/3): scatter of the selected hold's item across that
+product's trend dataframe (uly_trend / sol_trend / tts_trend), with
+UCL/LCL (blue) and USL/LSL (red) reference lines. The held wafer is
+red ("{root_lot_id} #{wafer_id}" legend entry); with no legend field
+chosen, other wafers from the same lot are a darker gray than the rest.
+Right (bottom 1/3): a comment plus a Flow/Retest/Hold disposition for
+the selected hold, saved to comments.csv.
 
 ======================================================================
 DATA PREP (mock — stands in for the real datalake pull, which can't be
-shared here). Produces the final dc_uly/dc_sol/dc_tts and
-uly_trend/sol_trend/tts_trend dataframes that the real pipeline already
-has ready. Everything from the "여기부터 streamlit" marker down is the
-actual dashboard and doesn't need to change when this section is
-swapped for the real data pull.
+shared here). load_data() returns the six dataframes the real pipeline
+already has ready: dc_uly/dc_sol/dc_tts and
+uly_trend/sol_trend/tts_trend. Swap its body for the real pull; it is
+cached because Streamlit re-runs this file on every click.
+
+Everything from the "여기부터 streamlit" marker down is the dashboard
+itself and reads only what load_data() returns, so it does not need to
+change when the data prep is swapped out.
 ======================================================================
 """
 
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+# must be the first Streamlit call, so it sits above the data prep -- the
+# cached loader below renders a spinner and would otherwise come first
+st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
+
+# KST is pinned at UTC+9 rather than read from the host clock, so the
+# header timestamp stays correct wherever the app is deployed.
+KST = timezone(timedelta(hours=9))
 
 LOT_ID_CHARS = list(string.ascii_uppercase + string.digits)
 
@@ -196,29 +211,39 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     ]
 
 
-# per-product trend ("uly_trend" style naming, matches the real dataframes)
-uly_trend = generate_probe_df("ULY")
-sol_trend = generate_probe_df("SOL")
-tts_trend = generate_probe_df("TTS")
+# Streamlit re-runs this whole file on every click, so the data pull lives
+# in a cached function: without the cache the datalake would be re-queried
+# on every row selection. ttl controls how stale the data may get before
+# the next interaction refreshes it.
+@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
+def load_data():
+    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, loaded_at).
+
+    Replace the body with the real datalake pull -- everything below the
+    "여기부터 streamlit" marker reads only what this returns.
+    """
+    uly_trend = generate_probe_df("ULY")
+    sol_trend = generate_probe_df("SOL")
+    tts_trend = generate_probe_df("TTS")
+
+    dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
+    dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
+    dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
+
+    # stamped inside the cache so the header shows when the data was
+    # actually pulled, not when the page was last re-rendered
+    loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
+    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, loaded_at
+
+
+dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT = load_data()
 
 TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-
-# per-product hold events ("dc_uly" style naming, matches the real dataframes)
-dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
-dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
-dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
 
 # ======================================================================
 # 여기부터 streamlit
 # ======================================================================
-
-from pathlib import Path
-
-import plotly.graph_objects as go
-import streamlit as st
-
-st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
 
 LEGEND_FIELD_OPTIONS = {
     "없음 (기본)": None,
@@ -238,13 +263,21 @@ HOVER_TEMPLATE = (
     "rw_cnt=%{customdata[5]}<extra></extra>"
 )
 
+# red is reserved for the held wafer, so it is kept out of this palette.
+# 20 entries so a high-cardinality field (many probe cards / eqp ids in the
+# queried window) doesn't wrap onto a duplicate color too quickly.
 CATEGORY_COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
     "#17becf", "#bcbd22", "#7f7f7f", "#e377c2", "#aec7e8",
+    "#3182bd", "#fdae6b", "#74c476", "#9e9ac8", "#a1866f",
+    "#6baed6", "#c7e9c0", "#525252", "#f7b6d2", "#dbdb8d",
 ]
 
 COMMENTS_PATH = Path(__file__).parent / "comments.csv"
-COMMENT_COLS = ["root_lot_id", "wafer_id", "item_id", "comment", "status", "saved_at"]
+COMMENT_COLS = [
+    "product", "root_lot_id", "wafer_id", "item_id", "hold_time",
+    "comment", "status", "saved_at",
+]
 STATUS_OPTIONS = ["Flow", "Retest", "Hold"]
 
 
@@ -266,9 +299,10 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
                    legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float,
                    chart_height: int) -> go.Figure:
     plot_df = trend_df.dropna(subset=[item_id])
-    is_bad = (plot_df["root_lot_id"] == bad_root_lot_id) & (plot_df["wafer_id"] == bad_wafer_id)
-    others = plot_df[~is_bad]
-    bad = plot_df[is_bad]
+    # match on the pair: wafer numbers 1-25 repeat across lots
+    is_bad_row = (plot_df["root_lot_id"] == bad_root_lot_id) & (plot_df["wafer_id"] == bad_wafer_id)
+    others = plot_df[~is_bad_row]
+    bad = plot_df[is_bad_row]
     bad_label = f"{bad_root_lot_id} #{bad_wafer_id}"
 
     fig = go.Figure()
@@ -286,6 +320,10 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
                 x=grp["tkout_time"], y=grp[item_id],
                 mode="markers", marker=marker,
                 name=name,
+                # the held wafer is added last so it draws on top, but ranks
+                # first in the legend: with many categories plotly clips the
+                # legend, and this entry must never be the one cut off
+                legendrank=1 if is_bad else 1000 + len(fig.data),
                 customdata=grp[HOVER_COLS].values,
                 hovertemplate=HOVER_TEMPLATE,
             )
@@ -296,14 +334,18 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
         add_group(others[~same_lot_mask], "lightgray", "other")
         add_group(others[same_lot_mask], "dimgray", bad_root_lot_id)
     else:
-        for i, (cat_val, grp) in enumerate(others.groupby(legend_field)):
-            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], str(cat_val))
+        # dropna=False: rows whose legend field is blank would otherwise be
+        # dropped from every group and silently vanish from the chart
+        for i, (cat_val, grp) in enumerate(others.groupby(legend_field, dropna=False)):
+            label = "(없음)" if pd.isna(cat_val) else str(cat_val)
+            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], label)
 
     if legend_field is None:
         add_group(bad, None, bad_label, is_bad=True)
     else:
-        for cat_val, grp in bad.groupby(legend_field):
-            add_group(grp, None, f"{bad_label}_{cat_val}", is_bad=True)
+        for cat_val, grp in bad.groupby(legend_field, dropna=False):
+            label = "(없음)" if pd.isna(cat_val) else str(cat_val)
+            add_group(grp, None, f"{bad_label}_{label}", is_bad=True)
 
     fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
     fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
@@ -314,53 +356,83 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
         xaxis_title="tkout_time",
         yaxis_title=item_id,
         legend_title=legend_field or "Legend",
+        # compact legend so a high-cardinality field still fits without
+        # plotly clipping entries off the bottom
+        legend=dict(font=dict(size=10), itemsizing="constant", tracegroupgap=0),
         height=chart_height,
         margin=dict(t=30, b=30),
     )
     return fig
 
 
+def hold_key(product: str, sel: pd.Series) -> dict:
+    """Identify one hold event.
+
+    product and hold_time are both part of the key: item ids (item1,
+    item2, ...) repeat across products, and the same wafer/item can be
+    held again on a later date -- keying on lot/wafer/item alone would
+    make those distinct holds share (and overwrite) one comment.
+    Everything is stringified so it survives the CSV round trip; an
+    all-digit root_lot_id would otherwise come back as an int and stop
+    matching.
+    """
+    return {
+        "product": str(product),
+        "root_lot_id": str(sel["root_lot_id"]),
+        "wafer_id": str(sel["wafer_id"]),
+        "item_id": str(sel["item_id"]),
+        "hold_time": str(sel["hold_time"]),
+    }
+
+
 def load_comments() -> pd.DataFrame:
     """Read comments.csv, normalized to COMMENT_COLS.
 
-    Missing columns (e.g. a file written before `status` existed) are
-    added as empty, and blank comments read back from CSV as NaN are
-    normalized to "" so they don't render as the string "nan".
+    Everything is read as text so key columns compare cleanly against
+    hold_key(); missing columns (e.g. a file written before `status` or
+    `product` existed) are added empty, and blanks that come back as NaN
+    are normalized to "" so they don't render as the string "nan".
     """
     if not COMMENTS_PATH.exists():
         return pd.DataFrame(columns=COMMENT_COLS)
 
-    comments_df = pd.read_csv(COMMENTS_PATH)
+    comments_df = pd.read_csv(COMMENTS_PATH, dtype=str).fillna("")
     for col in COMMENT_COLS:
         if col not in comments_df.columns:
             comments_df[col] = ""
-    comments_df["comment"] = comments_df["comment"].fillna("")
-    comments_df["status"] = comments_df["status"].fillna("")
     return comments_df
 
 
-def save_comment(root_lot_id: str, wafer_id: str, item_id: str, comment_text: str, status: str) -> None:
+def match_comment(comments_df: pd.DataFrame, key: dict) -> pd.Series:
+    """Boolean mask of the rows in comments_df belonging to `key`."""
+    if comments_df.empty:
+        return pd.Series(False, index=comments_df.index, dtype=bool)
+    mask = pd.Series(True, index=comments_df.index)
+    for col, val in key.items():
+        mask &= comments_df[col].astype(str) == val
+    return mask
+
+
+def save_comment(key: dict, comment_text: str, status: str) -> None:
     comments_df = load_comments()
-    mask = (
-        (comments_df["root_lot_id"] == root_lot_id)
-        & (comments_df["wafer_id"] == wafer_id)
-        & (comments_df["item_id"] == item_id)
-    )
-    now = datetime.now().isoformat(timespec="seconds")
+    mask = match_comment(comments_df, key)
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     if mask.any():
         comments_df.loc[mask, "comment"] = comment_text
         comments_df.loc[mask, "status"] = status
         comments_df.loc[mask, "saved_at"] = now
     else:
-        new_row = pd.DataFrame([{
-            "root_lot_id": root_lot_id, "wafer_id": wafer_id, "item_id": item_id,
-            "comment": comment_text, "status": status, "saved_at": now,
-        }])
+        new_row = pd.DataFrame([{**key, "comment": comment_text, "status": status, "saved_at": now}])
         comments_df = pd.concat([comments_df, new_row], ignore_index=True)
     comments_df.to_csv(COMMENTS_PATH, index=False)
 
 
-st.title("Hold 현황 대시보드")
+st.markdown(
+    f"# Hold 현황 "
+    f"<span style='font-size:0.42em; font-weight:400; color:#888;'>"
+    f"(Latest Data : {DATA_LOADED_AT})</span>",
+    unsafe_allow_html=True,
+)
 
 PANEL_HEIGHT = 650
 TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
@@ -380,8 +452,11 @@ with left:
     with title_col:
         st.subheader("DC OCAP List")
     with switch_col:
+        # required=True: without it, clicking the active product deselects it
+        # and the list silently falls back to ULY with no product highlighted
         selected_product = st.segmented_control(
-            "제품", list(PRODUCT_DC.keys()), default="ULY", label_visibility="collapsed", key="product_switch"
+            "제품", list(PRODUCT_DC.keys()), default="ULY", required=True,
+            label_visibility="collapsed", key="product_switch",
         )
     selected_product = selected_product or "ULY"
 
@@ -420,10 +495,13 @@ with right:
                 legend_label = st.selectbox("Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
             legend_field = LEGEND_FIELD_OPTIONS[legend_label]
 
+            if tdf[sel["item_id"]].notna().sum() == 0:
+                st.warning(f"{sel['item_id']} 은(는) 이 제품 trend 에 측정값이 없습니다.")
+
             fig = build_scatter(
                 tdf, sel["item_id"], sel["root_lot_id"], sel["wafer_id"], legend_field,
                 sel["ucl"], sel["lcl"], sel["usl"], sel["lsl"],
-                chart_height=TREND_HEIGHT - 190,
+                chart_height=TREND_HEIGHT - 150,
             )
             st.plotly_chart(fig, width="stretch")
             st.caption(
@@ -435,16 +513,13 @@ with right:
         if sel is None or tdf is None:
             st.caption("Comment")
         else:
+            key = hold_key(product, sel)
             comments_df = load_comments()
-            mask = (
-                (comments_df["root_lot_id"] == sel["root_lot_id"])
-                & (comments_df["wafer_id"] == sel["wafer_id"])
-                & (comments_df["item_id"] == sel["item_id"])
-            )
+            mask = match_comment(comments_df, key)
             existing_comment = comments_df.loc[mask, "comment"].iloc[-1] if mask.any() else ""
             existing_status = comments_df.loc[mask, "status"].iloc[-1] if mask.any() else None
             existing_status = existing_status if existing_status in STATUS_OPTIONS else None
-            comment_key = f"{sel['root_lot_id']}_{sel['wafer_id']}_{sel['item_id']}"
+            comment_key = "_".join(key.values())
 
             comment_text = st.text_area(
                 "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
@@ -464,5 +539,5 @@ with right:
                 if status_choice is None:
                     st.error("Flow / Retest / Hold 중 하나를 선택해주세요.")
                 else:
-                    save_comment(sel["root_lot_id"], sel["wafer_id"], sel["item_id"], comment_text, status_choice)
+                    save_comment(key, comment_text, status_choice)
                     st.success("저장되었습니다.")
