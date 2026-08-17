@@ -11,34 +11,22 @@ Right (bottom 1/3): a comment plus a Flow/Retest/Hold disposition for
 the selected hold, saved to comments.csv.
 
 ======================================================================
-DATA PREP (mock — stands in for the real datalake pull, which can't be
-shared here). load_data() returns the six dataframes the real pipeline
-already has ready: dc_uly/dc_sol/dc_tts and
-uly_trend/sol_trend/tts_trend. Swap its body for the real pull; it is
-cached because Streamlit re-runs this file on every click.
+DATA PREP (mock — stands in for the real pull, which can't be shared
+here). It only has to end up with these six dataframes:
+dc_uly / dc_sol / dc_tts and uly_trend / sol_trend / tts_trend.
+Replace this whole section with the real company-system pull.
 
-Everything from the "여기부터 streamlit" marker down is the dashboard
-itself and reads only what load_data() returns, so it does not need to
-change when the data prep is swapped out.
+It deliberately uses no streamlit: everything from the
+"여기부터 streamlit" marker down is self-contained (its own imports
+included), so replacing this section can't break the dashboard.
 ======================================================================
 """
 
 import string
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-
-# must be the first Streamlit call, so it sits above the data prep -- the
-# cached loader below renders a spinner and would otherwise come first
-st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
-
-# KST is pinned at UTC+9 rather than read from the host clock, so the
-# header timestamp stays correct wherever the app is deployed.
-KST = timezone(timedelta(hours=9))
 
 LOT_ID_CHARS = list(string.ascii_uppercase + string.digits)
 
@@ -211,39 +199,43 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     ]
 
 
-# Streamlit re-runs this whole file on every click, so the data pull lives
-# in a cached function: without the cache the datalake would be re-queried
-# on every row selection. ttl controls how stale the data may get before
-# the next interaction refreshes it.
-@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
-def load_data():
-    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, loaded_at).
+# per-product trend ("uly_trend" style naming, matches the real dataframes)
+uly_trend = generate_probe_df("ULY")
+sol_trend = generate_probe_df("SOL")
+tts_trend = generate_probe_df("TTS")
 
-    Replace the body with the real datalake pull -- everything below the
-    "여기부터 streamlit" marker reads only what this returns.
-    """
-    uly_trend = generate_probe_df("ULY")
-    sol_trend = generate_probe_df("SOL")
-    tts_trend = generate_probe_df("TTS")
-
-    dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
-    dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
-    dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
-
-    # stamped inside the cache so the header shows when the data was
-    # actually pulled, not when the page was last re-rendered
-    loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
-    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, loaded_at
-
-
-dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT = load_data()
-
-TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+# per-product hold events ("dc_uly" style naming, matches the real dataframes)
+dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
+dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
+dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
 
 # ======================================================================
 # 여기부터 streamlit
 # ======================================================================
+
+# imported here rather than at the top of the file so this section keeps
+# working if the data prep above is replaced wholesale
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+# must be the first streamlit call in the script
+st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
+
+# KST is pinned at UTC+9 rather than read from the host clock, so the
+# header timestamp stays correct wherever the app is deployed. Streamlit
+# re-runs this file on every click, so this stamps each render -- which
+# matches the data prep above also re-running each time. If that pull is
+# slow, wrap it in a @st.cache_data function and move this line inside so
+# the header reports when the data was actually fetched.
+KST = timezone(timedelta(hours=9))
+DATA_LOADED_AT = datetime.now(KST).strftime("%y/%m/%d %H:%M")
+
+TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
 
 LEGEND_FIELD_OPTIONS = {
     "없음 (기본)": None,
