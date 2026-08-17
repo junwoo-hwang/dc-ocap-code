@@ -12,11 +12,16 @@ the selected hold, saved to comments.csv.
 
 ======================================================================
 DATA PREP (mock — stands in for the real pull, which can't be shared
-here). It only has to end up with these six dataframes:
+here). Replace this whole section with the real company-system pull;
+it only has to end up with pull_data() returning these six dataframes:
 dc_uly / dc_sol / dc_tts and uly_trend / sol_trend / tts_trend.
-Replace this whole section with the real company-system pull.
 
-It deliberately uses no streamlit: everything from the
+Keep the pull inside pull_data() rather than at module level: Streamlit
+re-runs this file top to bottom on every click, so module-level code
+would re-query on every row selection. The dashboard calls it through
+@st.cache_data.
+
+This section deliberately uses no streamlit -- everything from the
 "여기부터 streamlit" marker down is self-contained (its own imports
 included), so replacing this section can't break the dashboard.
 ======================================================================
@@ -199,15 +204,23 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     ]
 
 
-# per-product trend ("uly_trend" style naming, matches the real dataframes)
-uly_trend = generate_probe_df("ULY")
-sol_trend = generate_probe_df("SOL")
-tts_trend = generate_probe_df("TTS")
+def pull_data():
+    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend).
 
-# per-product hold events ("dc_uly" style naming, matches the real dataframes)
-dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
-dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
-dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
+    Put the real company-system pull in here. It must be a function, not
+    bare module-level code: Streamlit re-runs this file top to bottom on
+    every click, so anything at module level would be re-fetched on every
+    row selection. The dashboard below calls this through a cache.
+    """
+    uly_trend = generate_probe_df("ULY")
+    sol_trend = generate_probe_df("SOL")
+    tts_trend = generate_probe_df("TTS")
+
+    dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
+    dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
+    dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
+
+    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend
 
 
 # ======================================================================
@@ -227,13 +240,24 @@ import streamlit as st
 st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
 
 # KST is pinned at UTC+9 rather than read from the host clock, so the
-# header timestamp stays correct wherever the app is deployed. Streamlit
-# re-runs this file on every click, so this stamps each render -- which
-# matches the data prep above also re-running each time. If that pull is
-# slow, wrap it in a @st.cache_data function and move this line inside so
-# the header reports when the data was actually fetched.
+# header timestamp stays correct wherever the app is deployed.
 KST = timezone(timedelta(hours=9))
-DATA_LOADED_AT = datetime.now(KST).strftime("%y/%m/%d %H:%M")
+
+
+# Streamlit re-runs this file on every click, so pull_data() is called
+# through a cache -- otherwise every row selection would re-query the
+# company system. ttl is how stale the data may get before the next
+# interaction refetches it; raise or lower it to taste, and use the app's
+# ⋮ menu > Clear cache to force a refresh.
+@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
+def load_data():
+    frames = pull_data()
+    # stamped inside the cache, so the header reports when the data was
+    # actually fetched rather than when the page was last re-rendered
+    return (*frames, datetime.now(KST).strftime("%y/%m/%d %H:%M"))
+
+
+dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT = load_data()
 
 TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
 
