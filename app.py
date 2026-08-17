@@ -260,6 +260,82 @@ def load_data():
 dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT = load_data()
 
 TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+
+# columns the dashboard below reads; anything missing would otherwise
+# surface as a KeyError deep in a callback
+DC_REQUIRED = [
+    "root_lot_id", "wafer_id", "hold_time", "item_id",
+    "hold_inform", "ucl", "lcl", "usl", "lsl", "line_id", "process_id",
+]
+TREND_REQUIRED = [
+    "root_lot_id", "wafer_id", "tkout_time",
+    "probe_card_id", "eqp_id", "lot_type", "rw_cnt",
+]
+
+
+def check_data() -> list[str]:
+    """Return human-readable problems with what pull_data() handed back.
+
+    Runs on the real data the first time it is plugged in, so a schema
+    mismatch reads as a plain list of what to fix instead of a KeyError.
+    """
+    problems = []
+    for product in PRODUCT_DC:
+        dc_df, trend_df = PRODUCT_DC[product], TREND_FRAMES[product]
+
+        for label, df, required in (
+            (f"dc_{product.lower()}", dc_df, DC_REQUIRED),
+            (f"{product.lower()}_trend", trend_df, TREND_REQUIRED),
+        ):
+            if not isinstance(df, pd.DataFrame):
+                problems.append(f"{label}: DataFrame 이 아닙니다 ({type(df).__name__}).")
+                continue
+            missing = [c for c in required if c not in df.columns]
+            if missing:
+                problems.append(f"{label}: 컬럼 없음 -> {', '.join(missing)}")
+
+        if not isinstance(dc_df, pd.DataFrame) or not isinstance(trend_df, pd.DataFrame):
+            continue
+
+        if "hold_time" in dc_df.columns and not pd.api.types.is_datetime64_any_dtype(dc_df["hold_time"]):
+            problems.append(
+                f"dc_{product.lower()}: hold_time 이 날짜형이 아닙니다 "
+                f"({dc_df['hold_time'].dtype}). pd.to_datetime() 으로 변환하세요."
+            )
+        if "tkout_time" in trend_df.columns and not pd.api.types.is_datetime64_any_dtype(trend_df["tkout_time"]):
+            problems.append(
+                f"{product.lower()}_trend: tkout_time 이 날짜형이 아닙니다 "
+                f"({trend_df['tkout_time'].dtype}). pd.to_datetime() 으로 변환하세요."
+            )
+
+        # dc.item_id must name a real column in that product's trend
+        if "item_id" in dc_df.columns and not dc_df.empty:
+            unknown = sorted(set(dc_df["item_id"]) - set(trend_df.columns))
+            if unknown:
+                problems.append(
+                    f"dc_{product.lower()}: item_id {unknown[:5]} 이(가) "
+                    f"{product.lower()}_trend 의 컬럼에 없습니다."
+                )
+
+        # a hold finds its wafer by the (root_lot_id, wafer_id) pair, so the
+        # two frames have to store them the same way
+        for col in ("root_lot_id", "wafer_id"):
+            if col in dc_df.columns and col in trend_df.columns:
+                if dc_df[col].dtype != trend_df[col].dtype:
+                    problems.append(
+                        f"{col}: dc_{product.lower()}({dc_df[col].dtype}) 와 "
+                        f"{product.lower()}_trend({trend_df[col].dtype}) 의 자료형이 다릅니다."
+                    )
+    return problems
+
+
+_problems = check_data()
+if _problems:
+    st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
+    for _p in _problems:
+        st.write("- " + _p)
+    st.stop()
 
 LEGEND_FIELD_OPTIONS = {
     "없음 (기본)": None,
@@ -461,7 +537,6 @@ DC_COLS = [
     "ucl", "lcl", "usl", "lsl", "step_seq", "line_id", "process_id", "sub_item_id",
 ]
 display_cols = ["hold_time", "root_lot_id", "wafer_id", "item_id", "hold_inform", "line_id", "process_id"]
-PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
 
 with left:
     title_col, switch_col = st.columns([2, 2])
