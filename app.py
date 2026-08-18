@@ -317,16 +317,29 @@ def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
         if not isinstance(dc_df, pd.DataFrame) or not isinstance(trend_df, pd.DataFrame):
             continue
 
-        if "hold_time" in dc_df.columns and not pd.api.types.is_datetime64_any_dtype(dc_df["hold_time"]):
-            problems.append(
-                f"dc_{product.lower()}: hold_time 이 날짜형이 아닙니다 "
-                f"({dc_df['hold_time'].dtype}). pd.to_datetime() 으로 변환하세요."
-            )
-        if "tkout_time" in trend_df.columns and not pd.api.types.is_datetime64_any_dtype(trend_df["tkout_time"]):
-            problems.append(
-                f"{product.lower()}_trend: tkout_time 이 날짜형이 아닙니다 "
-                f"({trend_df['tkout_time'].dtype}). pd.to_datetime() 으로 변환하세요."
-            )
+        # NAT_RATIO_LIMIT: pd.to_datetime(errors="coerce") turns anything it
+        # can't parse into NaT instead of raising, so a wrong format string
+        # or wrong source column silently turns the whole column into NaT
+        # with no error at all. A handful of genuinely bad rows is a normal
+        # data-quality reality and shouldn't block the dashboard, but most
+        # of a column failing means the conversion itself is broken.
+        NAT_RATIO_LIMIT = 0.5
+        for label, df, col in (
+            (f"dc_{product.lower()}", dc_df, "hold_time"),
+            (f"{product.lower()}_trend", trend_df, "tkout_time"),
+        ):
+            if col not in df.columns:
+                continue
+            if not pd.api.types.is_datetime64_any_dtype(df[col]):
+                problems.append(
+                    f"{label}: {col} 이 날짜형이 아닙니다 ({df[col].dtype}). "
+                    f"pd.to_datetime() 으로 변환하세요."
+                )
+            elif not df.empty and df[col].isna().mean() > NAT_RATIO_LIMIT:
+                problems.append(
+                    f"{label}: {col} 의 {df[col].isna().mean():.0%} 가 NaT 입니다 "
+                    f"(원본 값 형식이 pd.to_datetime 으로 파싱되지 않는 것으로 보입니다)."
+                )
 
         # dc.item_id must name a real column in that product's trend
         # (case-insensitively -- resolve_item_col handles the difference)
