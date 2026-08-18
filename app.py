@@ -274,6 +274,40 @@ TREND_REQUIRED = [
 ]
 
 
+def norm_lot(value) -> str:
+    """Canonical root_lot_id for matching (stray whitespace removed)."""
+    return str(value).strip()
+
+
+def norm_wafer(value):
+    """Canonical wafer number for matching.
+
+    dc may store it zero-padded as text or category ("03") while the
+    trend table has a plain int (3), so both are reduced to an int where
+    possible and to trimmed text otherwise.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
+    """Map a dc item_id onto the trend column holding that measurement.
+
+    The two tables don't always agree on capitalisation (dc may say
+    "ITEM3" where the trend column is "item3"), so an exact match is
+    tried first and a case-insensitive one -- ignoring stray whitespace
+    -- after. Returns None if nothing matches, or if the only matches
+    are case-insensitive ones that are ambiguous between themselves.
+    """
+    if item_id in trend_df.columns:
+        return item_id
+    key = str(item_id).strip().lower()
+    matches = [c for c in trend_df.columns if str(c).strip().lower() == key]
+    return matches[0] if len(matches) == 1 else None
+
+
 def check_data() -> list[str]:
     """Return human-readable problems with what pull_data() handed back.
 
@@ -310,23 +344,40 @@ def check_data() -> list[str]:
             )
 
         # dc.item_id must name a real column in that product's trend
+        # (case-insensitively -- resolve_item_col handles the difference)
         if "item_id" in dc_df.columns and not dc_df.empty:
-            unknown = sorted(set(dc_df["item_id"]) - set(trend_df.columns))
+            unknown = sorted(
+                str(i) for i in set(dc_df["item_id"])
+                if resolve_item_col(trend_df, i) is None
+            )
             if unknown:
                 problems.append(
                     f"dc_{product.lower()}: item_id {unknown[:5]} 이(가) "
                     f"{product.lower()}_trend 의 컬럼에 없습니다."
                 )
 
-        # a hold finds its wafer by the (root_lot_id, wafer_id) pair, so the
-        # two frames have to store them the same way
-        for col in ("root_lot_id", "wafer_id"):
-            if col in dc_df.columns and col in trend_df.columns:
-                if dc_df[col].dtype != trend_df[col].dtype:
-                    problems.append(
-                        f"{col}: dc_{product.lower()}({dc_df[col].dtype}) 와 "
-                        f"{product.lower()}_trend({trend_df[col].dtype}) 의 자료형이 다릅니다."
-                    )
+        # a hold finds its wafer by the (root_lot_id, wafer_id) pair. The
+        # dtypes may differ -- norm_lot/norm_wafer absorb that -- so what
+        # matters is whether the normalized pairs actually line up.
+        pair_cols = {"root_lot_id", "wafer_id"}
+        if pair_cols <= set(dc_df.columns) and pair_cols <= set(trend_df.columns) and not dc_df.empty:
+            trend_pairs = set(zip(trend_df["root_lot_id"].map(norm_lot),
+                                  trend_df["wafer_id"].map(norm_wafer)))
+            dc_pairs = set(zip(dc_df["root_lot_id"].map(norm_lot),
+                               dc_df["wafer_id"].map(norm_wafer)))
+            missing = dc_pairs - trend_pairs
+            if len(missing) == len(dc_pairs):
+                problems.append(
+                    f"dc_{product.lower()}: (root_lot_id, wafer_id) 가 "
+                    f"{product.lower()}_trend 에서 하나도 매칭되지 않습니다. "
+                    f"dc 예시 {sorted(missing)[:3]}"
+                )
+            elif missing:
+                problems.append(
+                    f"dc_{product.lower()}: {len(missing)}/{len(dc_pairs)} 건의 "
+                    f"(root_lot_id, wafer_id) 가 {product.lower()}_trend 에 없습니다 "
+                    f"(해당 hold 는 빨간 점이 안 찍힘). 예시 {sorted(missing)[:3]}"
+                )
     return problems
 
 
@@ -374,25 +425,35 @@ STATUS_OPTIONS = ["Flow", "Retest", "Hold"]
 
 
 def find_trend_df(product: str, item_id: str):
-    """Return the trend dataframe for `product`, or None if unusable.
+    """Return (trend dataframe, its column for item_id), or (None, None).
 
     The product is known from the hold list's own selection, so it is
     used directly instead of searching every trend frame for a matching
     root_lot_id -- a lot that appears under more than one product would
-    otherwise chart the wrong product's data.
+    otherwise chart the wrong product's data. The column is resolved
+    rather than taken literally because dc and the trend tables can
+    capitalise item ids differently.
     """
     tdf = TREND_FRAMES.get(product)
-    if tdf is None or tdf.empty or item_id not in tdf.columns:
-        return None
-    return tdf
+    if tdf is None or tdf.empty:
+        return None, None
+    item_col = resolve_item_col(tdf, item_id)
+    if item_col is None:
+        return None, None
+    return tdf, item_col
 
 
 def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: int,
                    legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float,
                    chart_height: int) -> go.Figure:
     plot_df = trend_df.dropna(subset=[item_id])
-    # match on the pair: wafer numbers 1-25 repeat across lots
-    is_bad_row = (plot_df["root_lot_id"] == bad_root_lot_id) & (plot_df["wafer_id"] == bad_wafer_id)
+    # match on the pair (wafer numbers 1-25 repeat across lots), and
+    # normalize both sides: dc and the trend table need not agree on how
+    # a lot id is padded or whether the wafer number is text or an int
+    is_bad_row = (
+        plot_df["root_lot_id"].map(norm_lot).eq(norm_lot(bad_root_lot_id))
+        & plot_df["wafer_id"].map(norm_wafer).eq(norm_wafer(bad_wafer_id))
+    )
     others = plot_df[~is_bad_row]
     bad = plot_df[is_bad_row]
     bad_label = f"{bad_root_lot_id} #{bad_wafer_id}"
@@ -470,9 +531,9 @@ def hold_key(product: str, sel: pd.Series) -> dict:
     """
     return {
         "product": str(product),
-        "root_lot_id": str(sel["root_lot_id"]),
-        "wafer_id": str(sel["wafer_id"]),
-        "item_id": str(sel["item_id"]),
+        "root_lot_id": norm_lot(sel["root_lot_id"]),
+        "wafer_id": str(norm_wafer(sel["wafer_id"])),
+        "item_id": str(sel["item_id"]).strip().lower(),
         "hold_time": str(sel["hold_time"]),
     }
 
@@ -573,7 +634,7 @@ with right:
     st.subheader("Item Trend")
     sel = dc_sorted.iloc[selected_rows[0]] if selected_rows else None
     product = selected_product
-    tdf = find_trend_df(product, sel["item_id"]) if sel is not None else None
+    tdf, item_col = find_trend_df(product, sel["item_id"]) if sel is not None else (None, None)
 
     with st.container(height=TREND_HEIGHT, border=True):
         if sel is None:
@@ -586,11 +647,11 @@ with right:
                 legend_label = st.selectbox("Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
             legend_field = LEGEND_FIELD_OPTIONS[legend_label]
 
-            if tdf[sel["item_id"]].notna().sum() == 0:
+            if tdf[item_col].notna().sum() == 0:
                 st.warning(f"{sel['item_id']} 은(는) 이 제품 trend 에 측정값이 없습니다.")
 
             fig = build_scatter(
-                tdf, sel["item_id"], sel["root_lot_id"], sel["wafer_id"], legend_field,
+                tdf, item_col, sel["root_lot_id"], sel["wafer_id"], legend_field,
                 sel["ucl"], sel["lcl"], sel["usl"], sel["lsl"],
                 chart_height=TREND_HEIGHT - 150,
             )
