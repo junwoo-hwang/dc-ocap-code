@@ -244,24 +244,6 @@ st.set_page_config(page_title="OCAP Hold Dashboard", layout="wide")
 KST = timezone(timedelta(hours=9))
 
 
-# Streamlit re-runs this file on every click, so pull_data() is called
-# through a cache -- otherwise every row selection would re-query the
-# company system. ttl is how stale the data may get before the next
-# interaction refetches it; raise or lower it to taste, and use the app's
-# ⋮ menu > Clear cache to force a refresh.
-@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
-def load_data():
-    frames = pull_data()
-    # stamped inside the cache, so the header reports when the data was
-    # actually fetched rather than when the page was last re-rendered
-    return (*frames, datetime.now(KST).strftime("%y/%m/%d %H:%M"))
-
-
-dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT = load_data()
-
-TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
-
 # columns the dashboard below reads; anything missing would otherwise
 # surface as a KeyError deep in a callback
 DC_REQUIRED = [
@@ -308,15 +290,18 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def check_data() -> list[str]:
+def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
     """Return human-readable problems with what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
     mismatch reads as a plain list of what to fix instead of a KeyError.
+    Called from inside the cached load_data(), because scanning full
+    trend tables on every rerun would cost more than the checks are
+    worth (~0.8s per click on 200k rows).
     """
     problems = []
-    for product in PRODUCT_DC:
-        dc_df, trend_df = PRODUCT_DC[product], TREND_FRAMES[product]
+    for product in product_dc:
+        dc_df, trend_df = product_dc[product], trend_frames[product]
 
         for label, df, required in (
             (f"dc_{product.lower()}", dc_df, DC_REQUIRED),
@@ -381,7 +366,32 @@ def check_data() -> list[str]:
     return problems
 
 
-_problems = check_data()
+# Streamlit re-runs this file on every click, so pull_data() is called
+# through a cache -- otherwise every row selection would re-query the
+# company system. ttl is how stale the data may get before the next
+# interaction refetches it; raise or lower it to taste, and use the app's
+# ⋮ menu > Clear cache to force a refresh.
+@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
+def load_data():
+    frames = pull_data()
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
+    # checked here rather than on every rerun: it scans the whole trend
+    # tables, which is far too slow to repeat on each click
+    problems = check_data(
+        {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
+        {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
+    )
+    # stamped inside the cache, so the header reports when the data was
+    # actually fetched rather than when the page was last re-rendered
+    loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
+    return (*frames, loaded_at, problems)
+
+
+dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT, _problems = load_data()
+
+TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+
 if _problems:
     st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
     for _p in _problems:
