@@ -274,6 +274,18 @@ def norm_wafer(value):
         return str(value).strip()
 
 
+def to_float(value) -> float | None:
+    """Best-effort float, e.g. for a BigQuery NUMERIC that came back as
+    text or Decimal. None (not NaN) so callers can tell "absent" from
+    "unparseable"; plotly's add_hline does arithmetic on y internally
+    and raises a TypeError several frames deep if it gets a str."""
+    try:
+        v = float(value)
+        return v if pd.notna(v) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     """Map a dc item_id onto the trend column holding that measurement.
 
@@ -339,6 +351,21 @@ def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
                 problems.append(
                     f"{label}: {col} 의 {df[col].isna().mean():.0%} 가 NaT 입니다 "
                     f"(원본 값 형식이 pd.to_datetime 으로 파싱되지 않는 것으로 보입니다)."
+                )
+
+        # ucl/lcl/usl/lsl must be numeric: plotly's add_hline raises a
+        # TypeError deep inside its own layout code (not a clean KeyError)
+        # if one of these came back as text (e.g. a BigQuery NUMERIC that
+        # round-tripped as str/Decimal). Cheap to check in full -- only 4
+        # columns, unlike the per-item trend checks below.
+        for limit_col in ("ucl", "lcl", "usl", "lsl"):
+            if limit_col not in dc_df.columns or dc_df.empty:
+                continue
+            bad_count = dc_df[limit_col].map(lambda v: to_float(v) is None and pd.notna(v)).sum()
+            if bad_count:
+                problems.append(
+                    f"dc_{product.lower()}: {limit_col} 의 {bad_count}개 값이 숫자로 "
+                    f"변환되지 않습니다 (dtype={dc_df[limit_col].dtype}). float 로 변환하세요."
                 )
 
         # dc.item_id must name a real column in that product's trend
@@ -467,9 +494,15 @@ def find_trend_df(product: str, item_id: str):
 
 
 def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: int,
-                   legend_field: str | None, ucl: float, lcl: float, usl: float, lsl: float,
+                   legend_field: str | None, ucl, lcl, usl, lsl,
                    chart_height: int) -> go.Figure:
-    plot_df = trend_df.dropna(subset=[item_id])
+    ucl, lcl, usl, lsl = to_float(ucl), to_float(lcl), to_float(usl), to_float(lsl)
+
+    # coerce before dropna: a numeric column that came back as text/object
+    # (BigQuery NUMERIC/DECIMAL) would otherwise keep its non-null string
+    # values and only fail once plotly tries to lay out the chart
+    plot_df = trend_df.assign(**{item_id: pd.to_numeric(trend_df[item_id], errors="coerce")})
+    plot_df = plot_df.dropna(subset=[item_id])
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
@@ -523,10 +556,16 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
             label = "(없음)" if pd.isna(cat_val) else str(cat_val)
             add_group(grp, None, f"{bad_label}_{label}", is_bad=True)
 
-    fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
-    fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
-    fig.add_hline(y=usl, line=dict(color="red", dash="dash"), annotation_text="USL", annotation_position="top left")
-    fig.add_hline(y=lsl, line=dict(color="red", dash="dash"), annotation_text="LSL", annotation_position="bottom left")
+    # skip any limit that didn't parse to a number rather than passing None
+    # through to plotly, which errors on a missing y just as it does on a str
+    if ucl is not None:
+        fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
+    if lcl is not None:
+        fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
+    if usl is not None:
+        fig.add_hline(y=usl, line=dict(color="red", dash="dash"), annotation_text="USL", annotation_position="top left")
+    if lsl is not None:
+        fig.add_hline(y=lsl, line=dict(color="red", dash="dash"), annotation_text="LSL", annotation_position="bottom left")
 
     fig.update_layout(
         xaxis_title="tkout_time",
