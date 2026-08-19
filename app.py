@@ -197,9 +197,15 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
         wafers = rng.choice(lot_rows["wafer_id"].unique(), size=min(n_waf, lot_rows["wafer_id"].nunique()), replace=False)
         items = rng.choice(item_cols, size=int(rng.integers(1, 4)), replace=False)
 
-        owner = f"{rng.choice(OWNER_DEPTS)} {rng.choice(OWNER_NAMES)}"
-        code = rng.choice(CODES, p=[0.55, 0.3, 0.15])
-        comment = rng.choice(COMMENTS_BY_CODE[code])
+        # not every hold has been triaged yet in the company system - leave
+        # a chunk of lots with no owner/code/comment so they still show up
+        # as an open "hold" rather than already-dispositioned "이력"
+        if rng.random() < 0.45:
+            owner = code = comment = None
+        else:
+            owner = f"{rng.choice(OWNER_DEPTS)} {rng.choice(OWNER_NAMES)}"
+            code = rng.choice(CODES, p=[0.55, 0.3, 0.15])
+            comment = rng.choice(COMMENTS_BY_CODE[code])
 
         for item_id in items:
             spread = cfg["spread"]
@@ -248,7 +254,7 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
                     }
                 )
 
-    return pd.DataFrame(rows)[
+    df = pd.DataFrame(rows)[
         [
             "lot_id",
             "root_lot_id",
@@ -270,6 +276,13 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             "comment",
         ]
     ]
+    # the 0.45 draw above can miss on every lot for an unlucky seed, leaving
+    # nothing undispositioned - force the most recent lot to be one so the
+    # "hold" (미처리) filter always has something to show
+    if df["owner"].notna().all() and not df.empty:
+        last_lot = df.loc[df["hold_time"].idxmax(), "lot_id"]
+        df.loc[df["lot_id"] == last_lot, ["owner", "code", "comment"]] = None
+    return df
 
 
 def pull_data():
@@ -337,8 +350,12 @@ def sort_wafers(values) -> list:
 
 
 def summarize(values) -> str:
-    """'item1' for one distinct value, 'item1외 2건' for several."""
-    seen = list(dict.fromkeys(str(v) for v in values))
+    """'item1' for one distinct value, 'item1외 2건' for several.
+
+    Blank/NaN entries (e.g. an undispositioned lot's code/owner) are
+    dropped rather than shown as the literal string "nan".
+    """
+    seen = list(dict.fromkeys(str(v).strip() for v in values if pd.notna(v) and str(v).strip()))
     if not seen:
         return ""
     return seen[0] if len(seen) == 1 else f"{seen[0]}외 {len(seen) - 1}건"
@@ -364,6 +381,17 @@ def format_disposition(rows: pd.DataFrame) -> tuple[str, str, str] | None:
         " / ".join(dict.fromkeys(owners)) if owners else "-",
         " / ".join(dict.fromkeys(codes)) if codes else "-",
     )
+
+
+def filter_by_status(dc_df: pd.DataFrame, status: str) -> pd.DataFrame:
+    """전체: 그대로 반환. hold: code/owner 가 둘 다 비어있는 행만 (아직 미처리).
+    이력: code 또는 owner 중 하나라도 있는 행만 (이미 처리됨)."""
+    if dc_df.empty or status == "전체":
+        return dc_df
+    code_blank = dc_df["code"].isna() | (dc_df["code"].astype(str).str.strip() == "")
+    owner_blank = dc_df["owner"].isna() | (dc_df["owner"].astype(str).str.strip() == "")
+    undispositioned = code_blank & owner_blank
+    return dc_df[undispositioned] if status == "hold" else dc_df[~undispositioned]
 
 
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
@@ -571,7 +599,7 @@ def load_data():
 dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, DATA_LOADED_AT, _problems = load_data()
 
 TREND_FRAMES = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-PRODUCT_DC = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+PRODUCT_DC = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
 
 if _problems:
     st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -587,14 +615,18 @@ LEGEND_FIELD_OPTIONS = {
     "rw_cnt": "rw_cnt",
 }
 
-HOVER_COLS = ["root_lot_id", "wafer_id", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
+# "_hover_time" rather than "tkout_time" itself: the x-axis needs the real
+# datetime column, and a plain string reads better in the hover box than
+# whatever plotly would stringify a raw Timestamp to
+HOVER_COLS = ["root_lot_id", "wafer_id", "_hover_time", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
 HOVER_TEMPLATE = (
     "root_lot_id=%{customdata[0]}<br>"
     "wafer_id=%{customdata[1]}<br>"
-    "probe_card_id=%{customdata[2]}<br>"
-    "eqp_id=%{customdata[3]}<br>"
-    "lot_type=%{customdata[4]}<br>"
-    "rw_cnt=%{customdata[5]}<extra></extra>"
+    "tkout_time=%{customdata[2]}<br>"
+    "probe_card_id=%{customdata[3]}<br>"
+    "eqp_id=%{customdata[4]}<br>"
+    "lot_type=%{customdata[5]}<br>"
+    "rw_cnt=%{customdata[6]}<extra></extra>"
 )
 
 # red means "past the scrap limit" and blue "past the control limit", so
@@ -647,6 +679,9 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # values and only fail once plotly tries to lay out the chart
     plot_df = trend_df.assign(**{item_id: pd.to_numeric(trend_df[item_id], errors="coerce")})
     plot_df = plot_df.dropna(subset=[item_id])
+    # keep tkout_time itself as a real datetime (needed for the x-axis);
+    # format a separate string column just for the hover box
+    plot_df["_hover_time"] = plot_df["tkout_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
@@ -760,6 +795,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# the comment box is a disabled (read-only) text_area, which streamlit
+# renders in light gray by default; override to black and slightly larger
+# so it's actually legible. -webkit-text-fill-color is needed too since
+# some browsers ignore `color` on a disabled field and only honor this.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stTextArea"] textarea:disabled {
+        color: #000 !important;
+        -webkit-text-fill-color: #000 !important;
+        font-size: 1.05rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 PANEL_HEIGHT = 650
 TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
 COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
@@ -772,22 +824,35 @@ DETAIL_COLS = ["wafer_id", "item_id", "rw_cnt", "hold_inform"]
 left, right = st.columns([2, 3])
 
 with left:
-    title_col, switch_col = st.columns([2, 2])
+    title_col, status_col = st.columns([1.6, 2.4])
     with title_col:
         st.subheader("DC OCAP List")
+    with status_col:
+        # required=True: same reasoning as the product switch below - without
+        # it, clicking the active option deselects it instead of staying put
+        status_filter = st.segmented_control(
+            "상태", ["전체", "hold", "이력"], default="hold", required=True,
+            label_visibility="collapsed", key="status_filter",
+        )
+
+    spacer_col, switch_col = st.columns([2.2, 1.8])
     with switch_col:
         # required=True: without it, clicking the active product deselects it
         # and the list silently falls back to ULY with no product highlighted
+        # width="stretch": fills the column so it lands flush with the right
+        # edge of the list table below, matching the requested layout
         selected_product = st.segmented_control(
             "제품", list(PRODUCT_DC.keys()), default="ULY", required=True,
-            label_visibility="collapsed", key="product_switch",
+            label_visibility="collapsed", key="product_switch", width="stretch",
         )
     selected_product = selected_product or "ULY"
+    status_filter = status_filter or "hold"
 
     dc_df = PRODUCT_DC[selected_product]
     if dc_df is None or dc_df.empty or "hold_time" not in dc_df.columns:
         dc_df = pd.DataFrame(columns=DC_REQUIRED)
         st.caption(f"{selected_product}: 현재 hold 건이 없습니다.")
+    dc_df = filter_by_status(dc_df, status_filter)
     grouped = group_holds(dc_df)
 
     event = st.dataframe(
