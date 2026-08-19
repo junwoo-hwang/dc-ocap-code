@@ -663,7 +663,7 @@ def find_trend_df(product: str, item_id: str):
 
 def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
                    legend_field: str | None, ucl, lcl, usl, lsl,
-                   chart_height: int) -> go.Figure:
+                   chart_height: int, focus_pair: tuple | None = None) -> go.Figure:
     """Scatter one measurement item over time.
 
     `bad_pairs` is the set of normalized (root_lot_id, wafer_id) pairs held
@@ -671,6 +671,11 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     highlighted together rather than one legend entry each. Those held
     wafers are then split by which limit they broke; `bad_label` is the
     lot id the entries are named after.
+
+    `focus_pair`, if given, is the (root_lot_id, wafer_id) last clicked in
+    the chart -- it gets a black ring on top of its existing marker(s) and
+    its own legend entry, so the selection stays visible regardless of
+    which color group the point itself belongs to.
     """
     ucl, lcl, usl, lsl = to_float(ucl), to_float(lcl), to_float(usl), to_float(lsl)
 
@@ -764,6 +769,28 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     add_bad(bad[past_control.loc[bad.index]], LIMIT_COLORS["control"], 2)
     add_bad(bad[in_spec.loc[bad.index]], "white", 3)
 
+    # ring around the last-clicked wafer, drawn last (so it's on top) and
+    # ranked first in the legend -- it doesn't replace the point's own
+    # color, just marks which one is currently focused
+    if focus_pair is not None:
+        froot, fwafer = focus_pair
+        focus_rows = plot_df[
+            plot_df["root_lot_id"].map(norm_lot).eq(norm_lot(froot))
+            & plot_df["wafer_id"].map(norm_wafer).eq(norm_wafer(fwafer))
+        ]
+        if not focus_rows.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=focus_rows["tkout_time"], y=focus_rows[item_id],
+                    mode="markers",
+                    marker=dict(color="rgba(0,0,0,0)", size=18, line=dict(width=3, color="black")),
+                    name=f"선택 WF: {norm_lot(froot)} #{norm_wafer(fwafer)}",
+                    legendrank=0,
+                    customdata=focus_rows[HOVER_COLS].values,
+                    hovertemplate=HOVER_TEMPLATE,
+                )
+            )
+
     # skip any limit that didn't parse to a number rather than passing None
     # through to plotly, which errors on a missing y just as it does on a str
     if ucl is not None:
@@ -807,6 +834,15 @@ st.markdown(
         -webkit-text-fill-color: #000 !important;
         font-size: 1.05rem !important;
     }
+    /* shrink the status-filter / product-switch segmented controls so the
+       list title and both of them fit on a single row */
+    div[data-testid="stButtonGroup"] button[data-variant="segmented_control"] {
+        padding: 0.15rem 0.55rem !important;
+        min-height: unset !important;
+    }
+    div[data-testid="stButtonGroup"] button[data-variant="segmented_control"] p {
+        font-size: 0.8rem !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -820,13 +856,21 @@ COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
 LIST_HEIGHT = 400
 DETAIL_HEIGHT = PANEL_HEIGHT - LIST_HEIGHT
 DETAIL_COLS = ["wafer_id", "item_id", "rw_cnt", "hold_inform"]
+# tracks the last wafer point clicked in the trend chart, independent of any
+# one widget's key, so it survives the list/nav-index switch a click can
+# trigger (which would otherwise remount the chart and lose its own state)
+FOCUS_KEY = "focused_wafer"
 
 left, right = st.columns([2, 3])
 
 with left:
-    title_col, status_col = st.columns([1.6, 2.4])
+    title_col, status_col, switch_col = st.columns([1.3, 1.75, 1.6])
     with title_col:
-        st.subheader("DC OCAP List")
+        st.markdown(
+            "<div style='font-size:1.15rem; font-weight:700; padding-top:0.3rem;'>"
+            "DC OCAP List</div>",
+            unsafe_allow_html=True,
+        )
     with status_col:
         # required=True: same reasoning as the product switch below - without
         # it, clicking the active option deselects it instead of staying put
@@ -834,8 +878,6 @@ with left:
             "상태", ["전체", "hold", "이력"], default="hold", required=True,
             label_visibility="collapsed", key="status_filter",
         )
-
-    spacer_col, switch_col = st.columns([2.2, 1.8])
     with switch_col:
         # required=True: without it, clicking the active product deselects it
         # and the list silently falls back to ULY with no product highlighted
@@ -848,12 +890,27 @@ with left:
     selected_product = selected_product or "ULY"
     status_filter = status_filter or "hold"
 
-    dc_df = PRODUCT_DC[selected_product]
-    if dc_df is None or dc_df.empty or "hold_time" not in dc_df.columns:
-        dc_df = pd.DataFrame(columns=DC_REQUIRED)
+    full_dc_df = PRODUCT_DC[selected_product]
+    if full_dc_df is None or full_dc_df.empty or "hold_time" not in full_dc_df.columns:
+        full_dc_df = pd.DataFrame(columns=DC_REQUIRED)
         st.caption(f"{selected_product}: 현재 hold 건이 없습니다.")
-    dc_df = filter_by_status(dc_df, status_filter)
+    # a clicked chart point is resolved against the full (unfiltered) set,
+    # since its history shouldn't disappear just because the current status
+    # filter happens to hide the lot it belongs to
+    dc_df = filter_by_status(full_dc_df, status_filter)
     grouped = group_holds(dc_df)
+
+    # a chart click on the previous run may have asked to switch the list's
+    # own selection to a different lot; that has to happen here, before the
+    # dataframe widget below is instantiated, since a widget's session_state
+    # key can no longer be written once the widget itself has been created
+    pending_switch = st.session_state.pop("pending_lot_switch", None)
+    if pending_switch and pending_switch.get("product") == selected_product:
+        match_idx = grouped.index[grouped["lot_id"] == pending_switch["lot_id"]]
+        if len(match_idx):
+            st.session_state[f"dc_table_{selected_product}"] = {
+                "selection": {"rows": [int(match_idx[0])], "columns": []}
+            }
 
     event = st.dataframe(
         grouped[GROUP_COLS],
@@ -905,7 +962,13 @@ with right:
 
     tdf, item_col = find_trend_df(product, item_id) if item_id is not None else (None, None)
 
-    clicked_pair = None  # (root_lot_id, wafer_id) of a point clicked in the chart, if any
+    # the focused wafer only applies while looking at the same product/item
+    # it was clicked on -- paging away (or switching product) falls back to
+    # the lot-level view, same as if nothing had been clicked
+    _focus = st.session_state.get(FOCUS_KEY)
+    chart_focus_pair = None
+    if _focus and _focus["product"] == product and _focus["item_id"] == item_id:
+        chart_focus_pair = (_focus["root_lot_id"], _focus["wafer_id"])
 
     with st.container(height=TREND_HEIGHT, border=True):
         if lot_id is None:
@@ -962,7 +1025,7 @@ with right:
                 fig = build_scatter(
                     tdf, item_col, bad_pairs, str(lot_id), legend_field,
                     limits["ucl"], limits["lcl"], limits["usl"], limits["lsl"],
-                    chart_height=TREND_HEIGHT - 150,
+                    chart_height=TREND_HEIGHT - 150, focus_pair=chart_focus_pair,
                 )
                 fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
 
@@ -974,7 +1037,43 @@ with right:
                 points = chart_event.selection.points if chart_event and chart_event.selection else []
                 if points and points[0].get("customdata"):
                     cd = points[0]["customdata"]
-                    clicked_pair = (cd[0], cd[1])  # HOVER_COLS: root_lot_id, wafer_id, ...
+                    new_root, new_wafer = cd[0], cd[1]  # HOVER_COLS: root_lot_id, wafer_id, ...
+                    new_focus = {
+                        "product": product, "item_id": item_id,
+                        "root_lot_id": new_root, "wafer_id": new_wafer,
+                    }
+                    if new_focus != _focus:
+                        st.session_state[FOCUS_KEY] = new_focus
+                        # if the clicked wafer belongs to a different lot than
+                        # the one currently checked in the list, switch the
+                        # list's own selection to match -- looked up against
+                        # the unfiltered set so a status-filtered-out lot's
+                        # history still resolves, even though there is then
+                        # no row left to check in the (filtered) list
+                        item_key = str(item_id).strip().lower()
+                        click_rows = full_dc_df[
+                            full_dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(new_root))
+                            & full_dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(new_wafer))
+                            & full_dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key)
+                        ]
+                        click_lot_id = click_rows["lot_id"].iloc[0] if not click_rows.empty else None
+                        if click_lot_id is not None and click_lot_id != lot_id:
+                            # the list widget was already instantiated this
+                            # run, so its selection can't be seeded until the
+                            # next run - see pending_switch handling above
+                            st.session_state["pending_lot_switch"] = {
+                                "product": selected_product, "lot_id": click_lot_id,
+                            }
+                            # keep the same item in view after the switch,
+                            # if the newly-selected lot also holds it
+                            new_lot_items = list(dict.fromkeys(
+                                dc_df[dc_df["lot_id"] == click_lot_id]["item_id"]
+                            ))
+                            new_nav_key = f"item_idx_{selected_product}_{click_lot_id}"
+                            st.session_state[new_nav_key] = (
+                                new_lot_items.index(item_id) if item_id in new_lot_items else 0
+                            )
+                        st.rerun()
 
                 st.caption(
                     f"제품: {product} · lot_id: {lot_id} · "
@@ -992,13 +1091,16 @@ with right:
             # matching is by (root_lot_id, wafer_id, item_id) rather than
             # lot_id, since the clicked wafer may belong to a different lot
             # (or to none at all, if it was never held).
-            if clicked_pair is not None:
-                click_lot, click_wafer = clicked_pair
+            if chart_focus_pair is not None:
+                click_lot, click_wafer = chart_focus_pair
                 item_key = str(item_id).strip().lower() if item_id else None
-                focus_rows = dc_df[
-                    dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(click_lot))
-                    & dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(click_wafer))
-                    & (dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key) if item_key else False)
+                # looked up against the full (unfiltered) set: a wafer's own
+                # history shouldn't read as "없음" just because the current
+                # status filter hides the lot it belongs to
+                focus_rows = full_dc_df[
+                    full_dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(click_lot))
+                    & full_dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(click_wafer))
+                    & (full_dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key) if item_key else False)
                 ]
                 st.caption(f"선택한 wafer: {norm_lot(click_lot)} #{norm_wafer(click_wafer)}")
             else:
@@ -1007,11 +1109,11 @@ with right:
             disposition = format_disposition(focus_rows)
             comment_text, owner_text, code_text = disposition or ("DC OCAP 이력이 없습니다.", "-", "-")
 
-            comment_key = f"comment_view_{nav_key}_{item_idx}_{clicked_pair}"
+            comment_key = f"comment_view_{nav_key}_{item_idx}_{chart_focus_pair}"
             st.text_area(
                 "Comment",
                 value=comment_text,
-                height=COMMENT_HEIGHT - (155 if clicked_pair is not None else 130),
+                height=COMMENT_HEIGHT - (155 if chart_focus_pair is not None else 130),
                 disabled=True,
                 key=comment_key,
             )
