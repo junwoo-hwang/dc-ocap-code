@@ -442,12 +442,20 @@ function renderFilterButtons() {
   });
 }
 
+// what a cell actually shows -- hold_time is carried as a raw ISO string
+// ("...T21:55:24") but rendered with a space, so searching has to go
+// through here or typing what you see on screen matches nothing
+function cellText(row, col) {
+  const v = col === "hold_time" ? formatDisplayTime(row[col]) : row[col];
+  return String(v ?? "");
+}
+
 function applySearchAndSort(grouped) {
   let rows = grouped;
   const q = state.searchText.trim().toLowerCase();
   if (q) {
     rows = rows.filter(row =>
-      LIST_COLS.some(col => String(row[col] ?? "").toLowerCase().includes(q))
+      LIST_COLS.some(col => cellText(row, col).toLowerCase().includes(q))
     );
   }
   if (state.sortCol) {
@@ -474,8 +482,8 @@ function renderList(grouped) {
   applySearchAndSort(grouped).forEach(row => {
     const tr = el("tr", { "data-lot-id": row.lot_id });
     if (row.lot_id === state.selectedLotId) tr.classList.add("selected");
-    [formatDisplayTime(row.hold_time), row.lot_id, row.wafer_id, row.item, row.hold_inform, row.code, row.owner]
-      .forEach(v => tr.appendChild(el("td", { text: v ?? "" })));
+    // same cellText() the search goes through, so the two can't drift apart
+    LIST_COLS.forEach(col => tr.appendChild(el("td", { text: cellText(row, col) })));
     listBody.appendChild(tr);
   });
 }

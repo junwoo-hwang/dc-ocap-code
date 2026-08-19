@@ -1258,8 +1258,24 @@ def build_dc_ocap_html() -> Path:
     return OUTPUT_PATH
 
 
-# only fires when this file is run directly (`python app.py`), not when
-# portal.py imports show_dc_ocap() from it -- see build_dc_ocap_html()'s
-# docstring above
+# Three ways this file gets loaded, and what each one should do:
+#
+#   python app.py          -> build the static dc_ocap.html export
+#   streamlit run app.py   -> render the dashboard standalone (preview)
+#   import from portal.py  -> define show_dc_ocap() and nothing else
+#
+# __name__ alone can't tell the first two apart: `streamlit run` also
+# executes the script as "__main__", so guarding on that by itself would
+# silently re-run the whole export -- a full data pull and a multi-MB file
+# write -- on every widget click, while rendering a blank page because
+# nothing called show_dc_ocap(). st.runtime.exists() is what separates
+# them; it's False under a plain interpreter and True inside a running
+# Streamlit server. The import case is already excluded by __name__.
 if __name__ == "__main__":
-    build_dc_ocap_html()
+    if st.runtime.exists():
+        # standalone preview: this file is the main script, so nothing else
+        # has claimed set_page_config yet (portal.py calls its own)
+        st.set_page_config(page_title="DC OCAP", layout="wide")
+        show_dc_ocap()
+    else:
+        build_dc_ocap_html()
