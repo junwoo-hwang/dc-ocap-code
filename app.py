@@ -310,10 +310,13 @@ def pull_data():
 
 # imported here rather than at the top of the file so this section keeps
 # working if the data prep above is replaced wholesale
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.offline as pyo
 import streamlit as st
 
 # KST is pinned at UTC+9 rather than read from the host clock, so the
@@ -1151,3 +1154,106 @@ def show_dc_ocap():
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+
+
+# ======================================================================
+# static-HTML export (dc_ocap.html) -- an alternative to show_dc_ocap()
+# for wherever the portal serves pages from can't run a live Python
+# process. Run this file directly (`python app.py`) on a schedule from
+# wherever pull_data() can actually reach the company system, then
+# upload the result next to the portal's other static reports (e.g. S3)
+# -- this only writes the local file, since the upload step needs
+# credentials this repo doesn't have.
+#
+# dc_ocap_template.html re-implements show_dc_ocap()'s whole interaction
+# model in vanilla JS + Plotly.js by hand -- see the comment at the top
+# of that file for why a straight "HTML export" of the Streamlit page
+# isn't possible and this had to be a separate port instead. Both share
+# pull_data()/check_data() above, so the real company-system swap only
+# has to happen once.
+# ======================================================================
+
+# __file__ only exists when this runs as an actual .py script (which is
+# how the scheduler will call it); it's undefined in a notebook cell, so
+# fall back to the current working directory there
+HERE = Path(__file__).parent if "__file__" in globals() else Path.cwd()
+TEMPLATE_PATH = HERE / "dc_ocap_template.html"
+OUTPUT_PATH = HERE / "dc_ocap.html"
+
+# kept in sync with dc_ocap_template.html's META_TREND_COLS -- everything
+# else in a trend row is an item measurement column
+META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
+
+
+def _clean(value):
+    """One cell -> a JSON-safe value: NaN/NaT -> None, Timestamp -> ISO
+    string, numpy scalar -> native Python (json.dumps chokes on numpy
+    int64/float64)."""
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    return value
+
+
+def _records(df: pd.DataFrame) -> list[dict]:
+    return [{k: _clean(v) for k, v in row.items()} for row in df.to_dict(orient="records")]
+
+
+def build_dc_ocap_html() -> Path:
+    """Generate dc_ocap.html from the current pull_data() and return its path."""
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = pull_data()
+
+    product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+    product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+
+    # same validation the Streamlit page runs before trusting the data --
+    # a bad schema should fail the scheduled build loudly rather than ship
+    # a broken dc_ocap.html
+    problems = check_data(product_dc, product_trend)
+    if problems:
+        raise SystemExit(
+            "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
+            + "\n".join(f"- {p}" for p in problems)
+        )
+
+    data = {
+        "dc": {p: _records(product_dc[p]) for p in product_dc},
+        "trend": {p: _records(product_trend[p]) for p in product_trend},
+        "itemCols": {
+            p: [c for c in product_trend[p].columns if c not in META_TREND_COLS]
+            for p in product_trend
+        },
+    }
+
+    generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
+
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    html = (
+        template
+        .replace("__GENERATED_AT__", generated_at)
+        .replace("/*__DATA_JSON__*/null", json.dumps(data, ensure_ascii=False))
+        # embedded rather than loaded from the public CDN: the portal server
+        # or its viewers may not have outbound internet access, only
+        # reachability to wherever this file itself gets hosted
+        .replace("/*__PLOTLY_JS__*/", pyo.offline.get_plotlyjs())
+    )
+    OUTPUT_PATH.write_text(html, encoding="utf-8")
+    print(f"wrote {OUTPUT_PATH} ({OUTPUT_PATH.stat().st_size / 1024:.0f} KB)")
+    return OUTPUT_PATH
+
+
+# only fires when this file is run directly (`python app.py`), not when
+# portal.py imports show_dc_ocap() from it -- see build_dc_ocap_html()'s
+# docstring above
+if __name__ == "__main__":
+    build_dc_ocap_html()
