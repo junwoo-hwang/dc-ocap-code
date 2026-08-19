@@ -847,7 +847,7 @@ with right:
             st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
         else:
             nav_prev, nav_label, nav_next, nav_gap, legend_col, reset_col = st.columns(
-                [0.6, 2.2, 0.6, 2.7, 2, 0.7]
+                [0.6, 2.2, 0.6, 1.8, 2, 1.6]
             )
             with nav_prev:
                 if st.button("◀", key=f"prev_{nav_key}", disabled=item_idx == 0, width="stretch"):
@@ -872,8 +872,12 @@ with right:
             with reset_col:
                 # bumps this chart's uirevision so plotly drops any zoom/pan
                 # back to the layout default, without remounting the widget
-                # (which would also throw away the clicked-point selection)
-                if st.button("✕", key=f"reset_{rev_key}", help="차트 확대/이동 초기화", width="stretch"):
+                # (which would also throw away the clicked-point selection).
+                # This can't live inside plotly's own modebar next to zoom/pan:
+                # a modebar button's click handler has to be a JS function, and
+                # st.plotly_chart's `config` only carries JSON to the frontend,
+                # so there's no way to wire it to this rerun from here.
+                if st.button("차트 초기화", key=f"reset_{rev_key}", help="확대/이동을 초기 상태로", width="stretch"):
                     st.session_state[rev_key] = st.session_state.get(rev_key, 0) + 1
                     st.rerun()
 
