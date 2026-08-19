@@ -43,6 +43,13 @@
   table.data-table th {
     text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0;
     color: #667085; font-weight: 600; position: sticky; top: 0; background: #fff;
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  table.data-table th:hover { color: #333; }
+  table.data-table th .sort-arrow { display: inline-block; width: 1em; color: #d33; }
+  .search-box {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 6px 10px;
+    border: 1px solid #d0d3d9; border-radius: 6px; font-size: 0.85rem;
   }
   table.data-table td { padding: 6px 8px; border-bottom: 1px solid #f1f3f5; white-space: nowrap; }
   table.data-table tbody tr { cursor: pointer; }
@@ -105,9 +112,18 @@
       </div>
 
       <div class="panel" id="listPanel">
+        <input type="text" id="listSearch" class="search-box" placeholder="검색 (전체 컬럼)">
         <table class="data-table">
           <thead>
-            <tr><th>hold_time</th><th>lot_id</th><th>wafer_id</th><th>item</th><th>hold_inform</th><th>code</th><th>owner</th></tr>
+            <tr id="listHeaderRow">
+              <th data-col="hold_time">hold_time<span class="sort-arrow"></span></th>
+              <th data-col="lot_id">lot_id<span class="sort-arrow"></span></th>
+              <th data-col="wafer_id">wafer_id<span class="sort-arrow"></span></th>
+              <th data-col="item">item<span class="sort-arrow"></span></th>
+              <th data-col="hold_inform">hold_inform<span class="sort-arrow"></span></th>
+              <th data-col="code">code<span class="sort-arrow"></span></th>
+              <th data-col="owner">owner<span class="sort-arrow"></span></th>
+            </tr>
           </thead>
           <tbody id="listBody"></tbody>
         </table>
@@ -159,7 +175,11 @@ const state = {
   itemIdxByKey: {},
   focusedWafer: null, // {product, itemId, rootLotId, waferId}
   legendField: null,
+  sortCol: "hold_time",
+  sortDir: "desc",
+  searchText: "",
 };
+const LIST_COLS = ["hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
 
 // ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
 function normLot(v) { return String(v).trim(); }
@@ -307,8 +327,22 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, u
   const pastScrap = (r) => (usl !== null && r._val > usl) || (lsl !== null && r._val < lsl);
   const pastControl = (r) => !pastScrap(r) && ((ucl !== null && r._val > ucl) || (lcl !== null && r._val < lcl));
 
-  const others = rows.filter(r => !isBad(r));
   const bad = rows.filter(r => isBad(r));
+  // exact-zero readings and points more than 3 std devs from the mean are
+  // almost always measurement glitches, not real excursions -- dropped
+  // from the background context points only, so they don't blow out the
+  // y-axis. Held wafers are exempt: a hold is often triggered by exactly
+  // this kind of extreme value, and hiding it would hide the reason it
+  // was held in the first place.
+  let others = rows.filter(r => !isBad(r) && r._val !== 0);
+  if (others.length >= 2) {
+    const mean = others.reduce((s, r) => s + r._val, 0) / others.length;
+    const variance = others.reduce((s, r) => s + (r._val - mean) ** 2, 0) / (others.length - 1);
+    const std = Math.sqrt(variance);
+    if (std > 0) {
+      others = others.filter(r => Math.abs(r._val - mean) <= 3 * std);
+    }
+  }
 
   const traces = [];
   function customdata(grp) {
@@ -338,13 +372,13 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, u
     const groups = new Map();
     for (const r of others) {
       const raw = r[legendField];
-      const key = (raw === null || raw === undefined) ? " NA" : String(raw);
+      const key = (raw === null || raw === undefined) ? " NA" : String(raw);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(r);
     }
     const keys = [...groups.keys()].sort();
     keys.forEach((key, i) => {
-      const label = key === " NA" ? "(없음)" : key;
+      const label = key === " NA" ? "(없음)" : key;
       addGroup(groups.get(key), CATEGORY_COLORS[i % CATEGORY_COLORS.length], label, 1000 + i, false);
     });
   }
@@ -417,9 +451,36 @@ function renderFilterButtons() {
   });
 }
 
+function applySearchAndSort(grouped) {
+  let rows = grouped;
+  const q = state.searchText.trim().toLowerCase();
+  if (q) {
+    rows = rows.filter(row =>
+      LIST_COLS.some(col => String(row[col] ?? "").toLowerCase().includes(q))
+    );
+  }
+  if (state.sortCol) {
+    const col = state.sortCol;
+    const dir = state.sortDir === "asc" ? 1 : -1;
+    rows = rows.slice().sort((a, b) => {
+      const av = String(a[col] ?? ""), bv = String(b[col] ?? "");
+      return av.localeCompare(bv) * dir;
+    });
+  }
+  return rows;
+}
+
+function renderListHeader() {
+  document.querySelectorAll("#listHeaderRow th").forEach(th => {
+    const arrow = th.querySelector(".sort-arrow");
+    arrow.textContent = th.dataset.col === state.sortCol ? (state.sortDir === "asc" ? "▲" : "▼") : "";
+  });
+}
+
 function renderList(grouped) {
+  renderListHeader();
   listBody.innerHTML = "";
-  grouped.forEach(row => {
+  applySearchAndSort(grouped).forEach(row => {
     const tr = el("tr", { "data-lot-id": row.lot_id });
     if (row.lot_id === state.selectedLotId) tr.classList.add("selected");
     [formatDisplayTime(row.hold_time), row.lot_id, row.wafer_id, row.item, row.hold_inform, row.code, row.owner]
@@ -458,6 +519,10 @@ function renderDetail(dcFiltered) {
 function ensureTrendSkeleton() {
   if (document.getElementById("navRow")) return;
   trendPanel.innerHTML = "";
+  // the old chartDiv (and its bound plotly_click listener) was just wiped
+  // out with it -- the next chart render needs to bind a fresh one to the
+  // element about to be created below, or clicks on it silently do nothing
+  chartClickBound = false;
   const navRow = el("div", { class: "nav-row", id: "navRow" });
   const prevBtn = el("button", { class: "nav-arrow", id: "prevBtn", text: "◀" });
   const itemLabel = el("div", { class: "item-label", id: "itemLabel" });
@@ -537,6 +602,11 @@ function renderTrendAndComment(dcAll, dcFiltered) {
   itemIdx = Math.min(itemIdx, Math.max(items.length - 1, 0));
   state.itemIdxByKey[key] = itemIdx;
   const itemId = items.length ? items[itemIdx] : null;
+  // the click handler is bound once per chartDiv (see below) and reads
+  // this instead of closing over itemId directly, so a stale reference
+  // doesn't stick around after paging to a different item on the same
+  // chartDiv without a full rebuild
+  state.currentItemId = itemId;
   const itemCol = itemId !== null ? resolveItemCol(state.product, itemId) : null;
 
   const focus = state.focusedWafer;
@@ -580,7 +650,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
       document.getElementById("chartDiv").on("plotly_click", (ev) => {
         const pt = ev.points && ev.points[0];
         if (!pt || !pt.customdata) return;
-        handleChartClick(pt.customdata[0], pt.customdata[1], itemId);
+        handleChartClick(pt.customdata[0], pt.customdata[1], state.currentItemId);
       });
       chartClickBound = true;
     }
@@ -650,6 +720,22 @@ listBody.addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-lot-id]");
   if (!tr) return;
   state.selectedLotId = tr.dataset.lotId;
+  renderAll();
+});
+document.getElementById("listHeaderRow").addEventListener("click", (e) => {
+  const th = e.target.closest("th[data-col]");
+  if (!th) return;
+  const col = th.dataset.col;
+  if (state.sortCol === col) {
+    state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+  } else {
+    state.sortCol = col;
+    state.sortDir = "asc";
+  }
+  renderAll();
+});
+document.getElementById("listSearch").addEventListener("input", (e) => {
+  state.searchText = e.target.value;
   renderAll();
 });
 
