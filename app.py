@@ -709,17 +709,12 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     bad = plot_df[is_bad_row]
     in_spec = ~(past_scrap | past_control)
 
-    # exact-zero readings and points more than 3 std devs from the mean are
-    # almost always measurement glitches, not real excursions -- dropped
-    # from the background context points only, so they don't blow out the
-    # y-axis. Held wafers are exempt: a hold is often triggered by exactly
-    # this kind of extreme value, and hiding it would hide the reason it
-    # was held in the first place.
+    # exact-zero readings are almost always measurement glitches, not real
+    # excursions -- dropped from the background context points only, so a
+    # handful of them don't blow out the y-axis. Held wafers are exempt: a
+    # hold is often triggered by exactly this kind of extreme value, and
+    # hiding it would hide the reason it was held in the first place.
     others = plot_df[~is_bad_row & (plot_df[item_id] != 0)]
-    if len(others) >= 2:
-        mean, std = others[item_id].mean(), others[item_id].std()
-        if std > 0:
-            others = others[(others[item_id] - mean).abs() <= 3 * std]
 
     fig = go.Figure()
 
