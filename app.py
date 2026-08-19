@@ -344,6 +344,28 @@ def summarize(values) -> str:
     return seen[0] if len(seen) == 1 else f"{seen[0]}외 {len(seen) - 1}건"
 
 
+def format_disposition(rows: pd.DataFrame) -> tuple[str, str, str] | None:
+    """Distinct (comment, owner, code) text from dc rows, or None.
+
+    None means "there is nothing real to show": no row matched at all, or
+    every row's comment and owner are both blank/NaN. The company system
+    merge can leave either blank on a genuine record, so a comment with no
+    owner (or vice versa) still counts as history and is shown as-is.
+    """
+    if rows.empty:
+        return None
+    comments = [str(c).strip() for c in rows["comment"] if pd.notna(c) and str(c).strip()]
+    owners = [str(o).strip() for o in rows["owner"] if pd.notna(o) and str(o).strip()]
+    if not comments and not owners:
+        return None
+    codes = [str(c).strip() for c in rows["code"] if pd.notna(c) and str(c).strip()]
+    return (
+        "\n".join(dict.fromkeys(comments)) if comments else "-",
+        " / ".join(dict.fromkeys(owners)) if owners else "-",
+        " / ".join(dict.fromkeys(codes)) if codes else "-",
+    )
+
+
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
     """Collapse the hold list to one row per lot_id.
 
@@ -787,7 +809,11 @@ with left:
             st.caption("행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다.")
         else:
             detail = dc_df[dc_df["lot_id"] == sel_lot_id].copy()
-            detail["_w"] = detail["wafer_id"].map(norm_wafer).map(
+            # astype(object) first: mapping a category column twice makes
+            # pandas try to rebuild it as a category, and since this map's
+            # result is tuples, pandas mistakes them for a MultiIndex and
+            # raises inside `.hasnans` instead of just building the column
+            detail["_w"] = detail["wafer_id"].astype(object).map(norm_wafer).map(
                 lambda v: (0, v) if isinstance(v, int) else (1, str(v))
             )
             detail = detail.sort_values(["item_id", "_w"])
@@ -814,11 +840,15 @@ with right:
 
     tdf, item_col = find_trend_df(product, item_id) if item_id is not None else (None, None)
 
+    clicked_pair = None  # (root_lot_id, wafer_id) of a point clicked in the chart, if any
+
     with st.container(height=TREND_HEIGHT, border=True):
         if lot_id is None:
             st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
         else:
-            nav_prev, nav_label, nav_next, nav_gap, legend_col = st.columns([0.6, 2.2, 0.6, 3.5, 2])
+            nav_prev, nav_label, nav_next, nav_gap, legend_col, reset_col = st.columns(
+                [0.6, 2.2, 0.6, 2.7, 2, 0.7]
+            )
             with nav_prev:
                 if st.button("◀", key=f"prev_{nav_key}", disabled=item_idx == 0, width="stretch"):
                     st.session_state[nav_key] = item_idx - 1
@@ -838,6 +868,14 @@ with right:
                     "Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0, label_visibility="collapsed"
                 )
             legend_field = LEGEND_FIELD_OPTIONS[legend_label]
+            rev_key = f"chart_rev_{nav_key}_{item_idx}"
+            with reset_col:
+                # bumps this chart's uirevision so plotly drops any zoom/pan
+                # back to the layout default, without remounting the widget
+                # (which would also throw away the clicked-point selection)
+                if st.button("✕", key=f"reset_{rev_key}", help="차트 확대/이동 초기화", width="stretch"):
+                    st.session_state[rev_key] = st.session_state.get(rev_key, 0) + 1
+                    st.rerun()
 
             if tdf is None:
                 st.warning(f"{item_id} 에 매칭되는 trend 데이터를 찾지 못했습니다.")
@@ -857,7 +895,18 @@ with right:
                     limits["ucl"], limits["lcl"], limits["usl"], limits["lsl"],
                     chart_height=TREND_HEIGHT - 150,
                 )
-                st.plotly_chart(fig, width="stretch")
+                fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
+
+                chart_event = st.plotly_chart(
+                    fig, width="stretch",
+                    on_select="rerun", selection_mode="points",
+                    key=f"chart_{nav_key}_{item_idx}",
+                )
+                points = chart_event.selection.points if chart_event and chart_event.selection else []
+                if points and points[0].get("customdata"):
+                    cd = points[0]["customdata"]
+                    clicked_pair = (cd[0], cd[1])  # HOVER_COLS: root_lot_id, wafer_id, ...
+
                 st.caption(
                     f"제품: {product} · lot_id: {lot_id} · "
                     f"wafer_id: {wafer_list} · item: {item_id}"
@@ -868,19 +917,39 @@ with right:
             st.caption("Comment")
         else:
             # the disposition is recorded in the company system and merged
-            # into dc, so it is shown read-only rather than edited here
-            item_rows = lot_rows[lot_rows["item_id"] == item_id] if item_id else lot_rows
+            # into dc, so it is shown read-only rather than edited here.
+            # Clicking a point in the chart focuses on that wafer's own
+            # record instead of the currently selected lot's held wafers;
+            # matching is by (root_lot_id, wafer_id, item_id) rather than
+            # lot_id, since the clicked wafer may belong to a different lot
+            # (or to none at all, if it was never held).
+            if clicked_pair is not None:
+                click_lot, click_wafer = clicked_pair
+                item_key = str(item_id).strip().lower() if item_id else None
+                focus_rows = dc_df[
+                    dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(click_lot))
+                    & dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(click_wafer))
+                    & (dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key) if item_key else False)
+                ]
+                st.caption(f"선택한 wafer: {norm_lot(click_lot)} #{norm_wafer(click_wafer)}")
+            else:
+                focus_rows = lot_rows[lot_rows["item_id"] == item_id] if item_id else lot_rows
+
+            disposition = format_disposition(focus_rows)
+            comment_text, owner_text, code_text = disposition or ("DC OCAP 이력이 없습니다.", "-", "-")
+
+            comment_key = f"comment_view_{nav_key}_{item_idx}_{clicked_pair}"
             st.text_area(
                 "Comment",
-                value="\n".join(dict.fromkeys(str(c) for c in item_rows["comment"])),
-                height=COMMENT_HEIGHT - 130,
+                value=comment_text,
+                height=COMMENT_HEIGHT - (155 if clicked_pair is not None else 130),
                 disabled=True,
-                key=f"comment_view_{nav_key}_{item_idx}",
+                key=comment_key,
             )
             st.markdown(
                 f"<div style='font-size:0.9em; line-height:1.7;'>"
-                f"<b>owner</b> &nbsp;{' / '.join(dict.fromkeys(str(o) for o in item_rows['owner']))}<br>"
-                f"<b>code</b> &nbsp;&nbsp;{' / '.join(dict.fromkeys(str(c) for c in item_rows['code']))}"
+                f"<b>owner</b> &nbsp;{owner_text}<br>"
+                f"<b>code</b> &nbsp;&nbsp;{code_text}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
