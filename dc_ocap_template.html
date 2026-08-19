@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>DC OCAP</title>
+<script>/*__PLOTLY_JS__*/</script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', 'Malgun Gothic', Arial, sans-serif;
+    margin: 0; padding: 24px; color: #0f172a; background: #ffffff;
+  }
+  h1 { margin: 0 0 20px 0; font-size: 2rem; }
+  h1 .ts { font-size: 0.42em; font-weight: 400; color: #888; }
+  h2 { margin: 0 0 8px 0; font-size: 1.4rem; }
+  .layout { display: flex; gap: 24px; align-items: flex-start; }
+  .left { flex: 2; min-width: 0; }
+  .right { flex: 3; min-width: 0; }
+
+  .header-row { display: flex; align-items: center; gap: 16px; margin-bottom: 6px; }
+  .list-title { font-size: 1.15rem; font-weight: 700; }
+  .header-row2 { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+
+  .seg { display: inline-flex; border: 1px solid #d0d3d9; border-radius: 8px; overflow: hidden; }
+  .seg button {
+    border: none; background: #fff; padding: 0.15rem 0.55rem; font-size: 0.8rem;
+    cursor: pointer; color: #333; border-right: 1px solid #d0d3d9;
+  }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { background: #fff1f0; color: #d33; font-weight: 600; }
+  .seg.stretch { display: flex; width: 100%; }
+  .seg.stretch button { flex: 1; }
+
+  .panel {
+    border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px;
+    overflow: auto; background: #fff;
+  }
+  .caption { color: #667085; font-size: 0.85rem; margin: 4px 0; }
+  .info-box { background: #e8f0fe; color: #1a56db; border-radius: 6px; padding: 12px; font-size: 0.9rem; }
+  .warning-box { background: #fff7e6; color: #93650b; border-radius: 6px; padding: 10px; font-size: 0.85rem; margin-bottom: 6px; }
+
+  table.data-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  table.data-table th {
+    text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0;
+    color: #667085; font-weight: 600; position: sticky; top: 0; background: #fff;
+  }
+  table.data-table td { padding: 6px 8px; border-bottom: 1px solid #f1f3f5; white-space: nowrap; }
+  table.data-table tbody tr { cursor: pointer; }
+  table.data-table tbody tr:hover { background: #f8fafc; }
+  table.data-table tbody tr.selected { background: #fff1f0; }
+  table.data-table tbody tr.selected td:first-child { box-shadow: inset 3px 0 0 #d33; }
+
+  #listPanel { height: 400px; }
+  #detailPanel { height: 250px; margin-top: 10px; }
+  #trendPanel { height: 434px; }
+  #commentPanel { height: 216px; margin-top: 10px; }
+
+  .nav-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .nav-row button.nav-arrow {
+    border: 1px solid #d0d3d9; background: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  .nav-row button.nav-arrow:disabled { color: #ccc; cursor: default; }
+  .nav-row .item-label { flex: 0 0 auto; min-width: 160px; text-align: center; }
+  .nav-row .item-label b { font-size: 1rem; }
+  .nav-row .item-label span { color: #888; font-size: 0.85rem; }
+  .nav-row .gap { flex: 1; }
+  .nav-row select {
+    border: 1px solid #d0d3d9; border-radius: 6px; padding: 4px 8px; font-size: 0.85rem;
+  }
+  .nav-row button.reset-btn {
+    border: 1px solid #d0d3d9; background: #fff; border-radius: 6px; padding: 4px 12px;
+    cursor: pointer; font-size: 0.85rem;
+  }
+
+  #chartDiv { width: 100%; }
+
+  textarea#commentText {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    border: 1px solid #d0d3d9; border-radius: 6px; padding: 8px;
+    color: #000; font-size: 1.05rem; background: #f4f5f7; font-family: inherit;
+  }
+  .disposition { font-size: 0.9em; line-height: 1.7; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>Hold 현황 <span class="ts">(Latest Data : __GENERATED_AT__)</span></h1>
+
+  <div class="layout">
+    <div class="left">
+      <div class="header-row">
+        <div class="list-title">DC OCAP List</div>
+        <div class="seg" id="statusFilter">
+          <button data-val="전체">전체</button>
+          <button data-val="hold" class="active">hold</button>
+          <button data-val="이력">이력</button>
+        </div>
+      </div>
+      <div class="header-row2">
+        <div class="seg stretch" id="productSwitch">
+          <button data-val="ULY" class="active">ULY</button>
+          <button data-val="TTS">TTS</button>
+          <button data-val="SOL">SOL</button>
+        </div>
+      </div>
+
+      <div class="panel" id="listPanel">
+        <table class="data-table">
+          <thead>
+            <tr><th>hold_time</th><th>lot_id</th><th>wafer_id</th><th>item</th><th>hold_inform</th><th>code</th><th>owner</th></tr>
+          </thead>
+          <tbody id="listBody"></tbody>
+        </table>
+      </div>
+
+      <div class="panel" id="detailPanel"></div>
+    </div>
+
+    <div class="right">
+      <h2>Item Trend</h2>
+      <div class="panel" id="trendPanel"></div>
+      <div class="panel" id="commentPanel"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = /*__DATA_JSON__*/null;
+
+const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
+const LEGEND_FIELD_OPTIONS = {
+  "없음 (기본)": null,
+  "probe_card_id": "probe_card_id",
+  "eqp_id": "eqp_id",
+  "lot_type": "lot_type",
+  "rw_cnt": "rw_cnt",
+};
+const HOVER_TEMPLATE =
+  "root_lot_id=%{customdata[0]}<br>" +
+  "wafer_id=%{customdata[1]}<br>" +
+  "tkout_time=%{customdata[2]}<br>" +
+  "probe_card_id=%{customdata[3]}<br>" +
+  "eqp_id=%{customdata[4]}<br>" +
+  "lot_type=%{customdata[5]}<br>" +
+  "rw_cnt=%{customdata[6]}<extra></extra>";
+const LIMIT_COLORS = { scrap: "red", control: "blue" };
+const CATEGORY_COLORS = [
+  "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
+  "#e377c2", "#7f7f7f", "#1b9e77", "#a6761d", "#66a61e",
+  "#5d4037", "#8e6c8a", "#93a01e", "#4d4d4d", "#c49a6c",
+  "#7fbf7b", "#af8dc3", "#d9a441", "#2f6f4e", "#6b4f8a",
+];
+
+// ---- state (mirrors show_dc_ocap()'s st.session_state usage) ----
+const state = {
+  product: "ULY",
+  statusFilter: "hold",
+  selectedLotId: null,
+  itemIdxByKey: {},
+  focusedWafer: null, // {product, itemId, rootLotId, waferId}
+  legendField: null,
+};
+
+// ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
+function normLot(v) { return String(v).trim(); }
+
+function normWafer(v) {
+  const s = String(v).trim();
+  return /^-?\d+$/.test(s) ? parseInt(s, 10) : s;
+}
+
+function toFloat(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pairKey(root, wafer) { return normLot(root) + "||" + normWafer(wafer); }
+
+function uniqueOrdered(values) {
+  const seen = new Set();
+  const out = [];
+  for (const v of values) { if (!seen.has(v)) { seen.add(v); out.push(v); } }
+  return out;
+}
+
+function dedupeNonBlank(values) {
+  const seen = new Set();
+  const out = [];
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    const s = String(v).trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function sortWafers(values) {
+  const normed = new Set(values.map(normWafer));
+  const nums = [...normed].filter(v => typeof v === "number").sort((a, b) => a - b);
+  const rest = [...normed].filter(v => typeof v !== "number").map(String).sort();
+  return nums.concat(rest);
+}
+
+function summarize(values) {
+  const seen = dedupeNonBlank(values);
+  if (seen.length === 0) return "";
+  return seen.length === 1 ? seen[0] : `${seen[0]}외 ${seen.length - 1}건`;
+}
+
+function formatDisposition(rows) {
+  if (rows.length === 0) return null;
+  const comments = dedupeNonBlank(rows.map(r => r.comment));
+  const owners = dedupeNonBlank(rows.map(r => r.owner));
+  if (comments.length === 0 && owners.length === 0) return null;
+  const codes = dedupeNonBlank(rows.map(r => r.code));
+  return {
+    comment: comments.length ? comments.join("\n") : "-",
+    owner: owners.length ? owners.join(" / ") : "-",
+    code: codes.length ? codes.join(" / ") : "-",
+  };
+}
+
+function filterByStatus(dcRows, status) {
+  if (status === "전체") return dcRows;
+  const blank = (v) => v === null || v === undefined || String(v).trim() === "";
+  const undisp = dcRows.filter(r => blank(r.code) && blank(r.owner));
+  if (status === "hold") return undisp;
+  const undispSet = new Set(undisp);
+  return dcRows.filter(r => !undispSet.has(r));
+}
+
+function groupHolds(dcRows) {
+  const order = [];
+  const groups = new Map();
+  for (const r of dcRows) {
+    if (!groups.has(r.lot_id)) { groups.set(r.lot_id, []); order.push(r.lot_id); }
+    groups.get(r.lot_id).push(r);
+  }
+  const rows = order.map(lotId => {
+    const grp = groups.get(lotId);
+    let holdTime = null;
+    for (const r of grp) { if (r.hold_time && (!holdTime || r.hold_time > holdTime)) holdTime = r.hold_time; }
+    return {
+      hold_time: holdTime,
+      lot_id: lotId,
+      wafer_id: sortWafers(grp.map(r => r.wafer_id)).join(","),
+      item: summarize(grp.map(r => r.item_id)),
+      hold_inform: summarize(grp.map(r => r.hold_inform)),
+      code: summarize(grp.map(r => r.code)),
+      owner: summarize(grp.map(r => r.owner)),
+    };
+  });
+  rows.sort((a, b) => (b.hold_time || "").localeCompare(a.hold_time || ""));
+  return rows;
+}
+
+function resolveItemCol(product, itemId) {
+  const cols = DATA.itemCols[product];
+  if (cols.includes(itemId)) return itemId;
+  const key = String(itemId).trim().toLowerCase();
+  const matches = cols.filter(c => String(c).trim().toLowerCase() === key);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function formatHoverTime(iso) {
+  if (!iso) return "";
+  return iso.replace("T", " ").split(".")[0];
+}
+
+function formatDisplayTime(iso) {
+  if (!iso) return "";
+  return iso.replace("T", " ").split(".")[0];
+}
+
+// ---- DOM helper ----
+function el(tag, props = {}, children = []) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("data-")) e.setAttribute(k, v);
+    else e[k] = v;
+  }
+  for (const c of children) e.appendChild(c);
+  return e;
+}
+
+// ---- chart building (port of build_scatter) ----
+function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, ucl, lcl, usl, lsl, focusPair) {
+  ucl = toFloat(ucl); lcl = toFloat(lcl); usl = toFloat(usl); lsl = toFloat(lsl);
+
+  const trend = DATA.trend[product];
+  const rows = [];
+  for (const r of trend) {
+    const raw = r[itemCol];
+    if (raw === null || raw === undefined) continue;
+    const val = Number(raw);
+    if (!Number.isFinite(val)) continue;
+    rows.push({ ...r, _val: val, _hoverTime: formatHoverTime(r.tkout_time) });
+  }
+
+  const badLots = new Set([...badPairs].map(p => p.split("||")[0]));
+  const isBad = (r) => badPairs.has(pairKey(r.root_lot_id, r.wafer_id));
+  const pastScrap = (r) => (usl !== null && r._val > usl) || (lsl !== null && r._val < lsl);
+  const pastControl = (r) => !pastScrap(r) && ((ucl !== null && r._val > ucl) || (lcl !== null && r._val < lcl));
+
+  const others = rows.filter(r => !isBad(r));
+  const bad = rows.filter(r => isBad(r));
+
+  const traces = [];
+  function customdata(grp) {
+    return grp.map(r => [r.root_lot_id, r.wafer_id, r._hoverTime, r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt]);
+  }
+  function addGroup(grp, color, name, rank, isBadGroup) {
+    if (grp.length === 0) return;
+    const marker = isBadGroup
+      ? { color, size: 11, line: { width: 1, color: "black" } }
+      : { color, size: 7 };
+    traces.push({
+      x: grp.map(r => r.tkout_time),
+      y: grp.map(r => r._val),
+      mode: "markers", marker, name,
+      legendrank: rank,
+      customdata: customdata(grp),
+      hovertemplate: HOVER_TEMPLATE,
+    });
+  }
+
+  if (!legendField) {
+    const sameLot = others.filter(r => badLots.has(normLot(r.root_lot_id)));
+    const notSameLot = others.filter(r => !badLots.has(normLot(r.root_lot_id)));
+    addGroup(notSameLot, "lightgray", "other", 1100, false);
+    addGroup(sameLot, "dimgray", [...badLots].sort().join(","), 1050, false);
+  } else {
+    const groups = new Map();
+    for (const r of others) {
+      const raw = r[legendField];
+      const key = (raw === null || raw === undefined) ? " NA" : String(raw);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
+    const keys = [...groups.keys()].sort();
+    keys.forEach((key, i) => {
+      const label = key === " NA" ? "(없음)" : key;
+      addGroup(groups.get(key), CATEGORY_COLORS[i % CATEGORY_COLORS.length], label, 1000 + i, false);
+    });
+  }
+
+  function addBad(subset, color, rank) {
+    if (subset.length === 0) return;
+    const wafers = sortWafers(subset.map(r => r.wafer_id)).join(",");
+    addGroup(subset, color, `${badLabel} #${wafers}`, rank, true);
+  }
+  addBad(bad.filter(r => pastScrap(r)), LIMIT_COLORS.scrap, 1);
+  addBad(bad.filter(r => pastControl(r)), LIMIT_COLORS.control, 2);
+  addBad(bad.filter(r => !pastScrap(r) && !pastControl(r)), "white", 3);
+
+  if (focusPair) {
+    const [froot, fwafer] = focusPair;
+    const focusRows = rows.filter(r => normLot(r.root_lot_id) === normLot(froot) && normWafer(r.wafer_id) === normWafer(fwafer));
+    if (focusRows.length) {
+      traces.push({
+        x: focusRows.map(r => r.tkout_time),
+        y: focusRows.map(r => r._val),
+        mode: "markers",
+        marker: { color: "rgba(0,0,0,0)", size: 18, line: { width: 3, color: "black" } },
+        name: `선택 WF: ${normLot(froot)} #${normWafer(fwafer)}`,
+        legendrank: 0,
+        customdata: customdata(focusRows),
+        hovertemplate: HOVER_TEMPLATE,
+      });
+    }
+  }
+
+  const shapes = [];
+  const annotations = [];
+  function addHline(y, color, text, atTop) {
+    shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y, line: { color, dash: "dash" } });
+    annotations.push({
+      xref: "paper", x: 0, xanchor: "left", yref: "y", y, text,
+      showarrow: false, font: { color, size: 11 }, yanchor: atTop ? "bottom" : "top",
+    });
+  }
+  if (ucl !== null) addHline(ucl, "blue", "UCL", true);
+  if (lcl !== null) addHline(lcl, "blue", "LCL", false);
+  if (usl !== null) addHline(usl, "red", "USL", true);
+  if (lsl !== null) addHline(lsl, "red", "LSL", false);
+
+  const layout = {
+    xaxis: { title: { text: "tkout_time" } },
+    yaxis: { title: { text: itemCol } },
+    legend: { title: { text: legendField || "Legend" }, font: { size: 10 }, itemsizing: "constant", tracegroupgap: 0 },
+    shapes, annotations,
+    margin: { t: 30, b: 30, l: 55, r: 20 },
+    height: 284,
+  };
+  return { traces, layout, measuredCount: rows.length };
+}
+
+// ---- rendering ----
+const listBody = document.getElementById("listBody");
+const detailPanel = document.getElementById("detailPanel");
+const trendPanel = document.getElementById("trendPanel");
+const commentPanel = document.getElementById("commentPanel");
+
+let chartClickBound = false;
+
+function renderFilterButtons() {
+  document.querySelectorAll("#statusFilter button").forEach(b => {
+    b.classList.toggle("active", b.dataset.val === state.statusFilter);
+  });
+  document.querySelectorAll("#productSwitch button").forEach(b => {
+    b.classList.toggle("active", b.dataset.val === state.product);
+  });
+}
+
+function renderList(grouped) {
+  listBody.innerHTML = "";
+  grouped.forEach(row => {
+    const tr = el("tr", { "data-lot-id": row.lot_id });
+    if (row.lot_id === state.selectedLotId) tr.classList.add("selected");
+    [formatDisplayTime(row.hold_time), row.lot_id, row.wafer_id, row.item, row.hold_inform, row.code, row.owner]
+      .forEach(v => tr.appendChild(el("td", { text: v ?? "" })));
+    listBody.appendChild(tr);
+  });
+}
+
+function renderDetail(dcFiltered) {
+  detailPanel.innerHTML = "";
+  const lotId = state.selectedLotId;
+  if (lotId === null) {
+    detailPanel.appendChild(el("div", { class: "caption", text: "행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다." }));
+    return;
+  }
+  const rows = dcFiltered.filter(r => r.lot_id === lotId).slice();
+  rows.sort((a, b) => {
+    const ai = String(a.item_id), bi = String(b.item_id);
+    if (ai !== bi) return ai.localeCompare(bi);
+    const wa = normWafer(a.wafer_id), wb = normWafer(b.wafer_id);
+    const ta = typeof wa === "number" ? 0 : 1, tb = typeof wb === "number" ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    return ta === 0 ? wa - wb : String(wa).localeCompare(String(wb));
+  });
+  detailPanel.appendChild(el("div", { class: "caption", text: `${lotId} · ${rows.length}건` }));
+  const table = el("table", { class: "data-table" });
+  const thead = el("thead", {}, [el("tr", {}, ["wafer_id", "item_id", "rw_cnt", "hold_inform"].map(h => el("th", { text: h })))]);
+  const tbody = el("tbody");
+  rows.forEach(r => {
+    tbody.appendChild(el("tr", {}, [r.wafer_id, r.item_id, r.rw_cnt, r.hold_inform].map(v => el("td", { text: v ?? "" }))));
+  });
+  table.appendChild(thead); table.appendChild(tbody);
+  detailPanel.appendChild(table);
+}
+
+function ensureTrendSkeleton() {
+  if (document.getElementById("navRow")) return;
+  trendPanel.innerHTML = "";
+  const navRow = el("div", { class: "nav-row", id: "navRow" });
+  const prevBtn = el("button", { class: "nav-arrow", id: "prevBtn", text: "◀" });
+  const itemLabel = el("div", { class: "item-label", id: "itemLabel" });
+  const nextBtn = el("button", { class: "nav-arrow", id: "nextBtn", text: "▶" });
+  const gap = el("div", { class: "gap" });
+  const legendSelect = el("select", { id: "legendSelect" });
+  Object.keys(LEGEND_FIELD_OPTIONS).forEach(label => legendSelect.appendChild(el("option", { value: label, text: label })));
+  const resetBtn = el("button", { class: "reset-btn", id: "resetBtn", text: "차트 초기화" });
+  [prevBtn, itemLabel, nextBtn, gap, legendSelect, resetBtn].forEach(c => navRow.appendChild(c));
+  trendPanel.appendChild(navRow);
+  trendPanel.appendChild(el("div", { id: "chartWarning" }));
+  trendPanel.appendChild(el("div", { id: "chartDiv" }));
+  trendPanel.appendChild(el("div", { class: "caption", id: "chartCaption" }));
+
+  prevBtn.addEventListener("click", () => {
+    const key = `${state.product}|${state.selectedLotId}`;
+    state.itemIdxByKey[key] = Math.max(0, (state.itemIdxByKey[key] ?? 0) - 1);
+    renderAll();
+  });
+  nextBtn.addEventListener("click", () => {
+    const key = `${state.product}|${state.selectedLotId}`;
+    state.itemIdxByKey[key] = (state.itemIdxByKey[key] ?? 0) + 1;
+    renderAll();
+  });
+  legendSelect.addEventListener("change", () => {
+    state.legendField = LEGEND_FIELD_OPTIONS[legendSelect.value];
+    renderAll();
+  });
+  resetBtn.addEventListener("click", () => {
+    Plotly.relayout("chartDiv", { "xaxis.autorange": true, "yaxis.autorange": true });
+  });
+}
+
+function handleChartClick(clickedRoot, clickedWafer, itemId) {
+  state.focusedWafer = { product: state.product, itemId, rootLotId: clickedRoot, waferId: clickedWafer };
+
+  const fullDc = DATA.dc[state.product];
+  const itemKey = String(itemId).trim().toLowerCase();
+  const clickRows = fullDc.filter(r =>
+    normLot(r.root_lot_id) === normLot(clickedRoot) &&
+    normWafer(r.wafer_id) === normWafer(clickedWafer) &&
+    String(r.item_id).trim().toLowerCase() === itemKey
+  );
+  const clickLotId = clickRows.length ? clickRows[0].lot_id : null;
+
+  if (clickLotId !== null && clickLotId !== state.selectedLotId) {
+    // only adopt it as the checked list row if it's visible under the
+    // current status filter -- otherwise there's no row to check, but the
+    // ring/comment below still resolve against the full (unfiltered) set
+    const filtered = filterByStatus(fullDc, state.statusFilter);
+    if (filtered.some(r => r.lot_id === clickLotId)) {
+      const newItems = uniqueOrdered(filtered.filter(r => r.lot_id === clickLotId).map(r => r.item_id));
+      state.itemIdxByKey[`${state.product}|${clickLotId}`] = newItems.includes(itemId) ? newItems.indexOf(itemId) : 0;
+      state.selectedLotId = clickLotId;
+    }
+  }
+  renderAll();
+}
+
+function renderTrendAndComment(dcAll, dcFiltered) {
+  const lotId = state.selectedLotId;
+
+  if (lotId === null) {
+    trendPanel.innerHTML = "";
+    trendPanel.appendChild(el("div", { class: "info-box", text: "왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다." }));
+    commentPanel.innerHTML = "";
+    commentPanel.appendChild(el("div", { class: "caption", text: "Comment" }));
+    return;
+  }
+
+  ensureTrendSkeleton();
+
+  const lotRows = dcFiltered.filter(r => r.lot_id === lotId);
+  const items = uniqueOrdered(lotRows.map(r => r.item_id));
+  const key = `${state.product}|${lotId}`;
+  let itemIdx = state.itemIdxByKey[key] ?? 0;
+  itemIdx = Math.min(itemIdx, Math.max(items.length - 1, 0));
+  state.itemIdxByKey[key] = itemIdx;
+  const itemId = items.length ? items[itemIdx] : null;
+  const itemCol = itemId !== null ? resolveItemCol(state.product, itemId) : null;
+
+  const focus = state.focusedWafer;
+  let chartFocusPair = null;
+  if (focus && focus.product === state.product && focus.itemId === itemId) {
+    chartFocusPair = [focus.rootLotId, focus.waferId];
+  }
+
+  document.getElementById("prevBtn").disabled = itemIdx === 0;
+  document.getElementById("nextBtn").disabled = itemIdx >= items.length - 1;
+  const itemLabel = document.getElementById("itemLabel");
+  itemLabel.innerHTML = "";
+  itemLabel.appendChild(el("b", { text: itemId ?? "" }));
+  itemLabel.appendChild(document.createTextNode(" "));
+  itemLabel.appendChild(el("span", { text: items.length ? `(${itemIdx + 1}/${items.length})` : "" }));
+  document.getElementById("legendSelect").value = Object.keys(LEGEND_FIELD_OPTIONS).find(k => LEGEND_FIELD_OPTIONS[k] === state.legendField);
+
+  const warningBox = document.getElementById("chartWarning");
+  warningBox.innerHTML = "";
+  const chartCaption = document.getElementById("chartCaption");
+
+  if (itemCol === null) {
+    warningBox.appendChild(el("div", { class: "warning-box", text: `${itemId} 에 매칭되는 trend 데이터를 찾지 못했습니다.` }));
+    Plotly.purge("chartDiv");
+    chartCaption.textContent = "";
+  } else {
+    const itemRows = lotRows.filter(r => r.item_id === itemId);
+    const badPairs = new Set(itemRows.map(r => pairKey(r.root_lot_id, r.wafer_id)));
+    const waferList = sortWafers(itemRows.map(r => r.wafer_id)).join(",");
+    const limits = itemRows[0] || {};
+
+    const { traces, layout, measuredCount } = buildScatterTraces(
+      state.product, itemCol, badPairs, String(lotId), state.legendField,
+      limits.ucl, limits.lcl, limits.usl, limits.lsl, chartFocusPair
+    );
+    if (measuredCount === 0) {
+      warningBox.appendChild(el("div", { class: "warning-box", text: `${itemId} 은(는) 이 제품 trend 에 측정값이 없습니다.` }));
+    }
+    Plotly.react("chartDiv", traces, layout, { displayModeBar: true, responsive: true });
+    if (!chartClickBound) {
+      document.getElementById("chartDiv").on("plotly_click", (ev) => {
+        const pt = ev.points && ev.points[0];
+        if (!pt || !pt.customdata) return;
+        handleChartClick(pt.customdata[0], pt.customdata[1], itemId);
+      });
+      chartClickBound = true;
+    }
+    chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`;
+  }
+
+  // comment panel
+  commentPanel.innerHTML = "";
+  let focusRows;
+  if (chartFocusPair) {
+    const [croot, cwafer] = chartFocusPair;
+    const itemKey = itemId !== null ? String(itemId).trim().toLowerCase() : null;
+    focusRows = dcAll.filter(r =>
+      normLot(r.root_lot_id) === normLot(croot) &&
+      normWafer(r.wafer_id) === normWafer(cwafer) &&
+      (itemKey ? String(r.item_id).trim().toLowerCase() === itemKey : false)
+    );
+    commentPanel.appendChild(el("div", { class: "caption", text: `선택한 wafer: ${normLot(croot)} #${normWafer(cwafer)}` }));
+  } else {
+    focusRows = itemId !== null ? lotRows.filter(r => r.item_id === itemId) : lotRows;
+  }
+  commentPanel.appendChild(el("div", { class: "caption", text: "Comment" }));
+
+  const disp = formatDisposition(focusRows);
+  const commentText = disp ? disp.comment : "DC OCAP 이력이 없습니다.";
+  const ownerText = disp ? disp.owner : "-";
+  const codeText = disp ? disp.code : "-";
+
+  const textarea = el("textarea", { id: "commentText", disabled: true });
+  textarea.value = commentText;
+  textarea.style.height = chartFocusPair ? "86px" : "111px";
+  commentPanel.appendChild(textarea);
+
+  const dispositionDiv = el("div", { class: "disposition" });
+  dispositionDiv.appendChild(el("b", { text: "owner" }));
+  dispositionDiv.appendChild(document.createTextNode(`  ${ownerText}`));
+  dispositionDiv.appendChild(el("br"));
+  dispositionDiv.appendChild(el("b", { text: "code" }));
+  dispositionDiv.appendChild(document.createTextNode(`   ${codeText}`));
+  commentPanel.appendChild(dispositionDiv);
+}
+
+function renderAll() {
+  renderFilterButtons();
+  const dcAll = DATA.dc[state.product];
+  const dcFiltered = filterByStatus(dcAll, state.statusFilter);
+  const grouped = groupHolds(dcFiltered);
+  renderList(grouped);
+  renderDetail(dcFiltered);
+  renderTrendAndComment(dcAll, dcFiltered);
+}
+
+document.getElementById("statusFilter").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  state.statusFilter = btn.dataset.val;
+  renderAll();
+});
+document.getElementById("productSwitch").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  state.product = btn.dataset.val;
+  state.selectedLotId = null;
+  renderAll();
+});
+listBody.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-lot-id]");
+  if (!tr) return;
+  state.selectedLotId = tr.dataset.lotId;
+  renderAll();
+});
+
+renderAll();
+</script>
+</body>
+</html>

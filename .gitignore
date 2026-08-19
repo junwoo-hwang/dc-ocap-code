@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# build output of build_dc_ocap_html.py -- regenerated on demand (the
+# scheduled job would produce this and upload it, not commit it)
+dc_ocap.html
