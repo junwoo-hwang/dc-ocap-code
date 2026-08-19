@@ -695,15 +695,17 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # is what the engineer is here to make. Scrap outranks control in the
     # legend, and a held wafer inside both limits (held on a trend rule or
     # an equipment alarm) is drawn hollow rather than given a limit color.
-    def add_bad(subset: pd.DataFrame, color: str, suffix: str, rank: int) -> None:
+    # The entries are named by lot and wafer only: the marker color already
+    # says which limit, so spelling it out again just crowds the legend.
+    def add_bad(subset: pd.DataFrame, color: str, rank: int) -> None:
         if subset.empty:
             return
         wafers = ",".join(str(w) for w in sort_wafers(subset["wafer_id"]))
-        add_group(subset, color, f"{bad_label} #{wafers}{suffix}", rank=rank, is_bad=True)
+        add_group(subset, color, f"{bad_label} #{wafers}", rank=rank, is_bad=True)
 
-    add_bad(bad[past_scrap.loc[bad.index]], LIMIT_COLORS["scrap"], " (scrap 이탈)", 1)
-    add_bad(bad[past_control.loc[bad.index]], LIMIT_COLORS["control"], " (control 이탈)", 2)
-    add_bad(bad[in_spec.loc[bad.index]], "white", "", 3)
+    add_bad(bad[past_scrap.loc[bad.index]], LIMIT_COLORS["scrap"], 1)
+    add_bad(bad[past_control.loc[bad.index]], LIMIT_COLORS["control"], 2)
+    add_bad(bad[in_spec.loc[bad.index]], "white", 3)
 
     # skip any limit that didn't parse to a number rather than passing None
     # through to plotly, which errors on a missing y just as it does on a str
