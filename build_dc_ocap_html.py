@@ -27,7 +27,10 @@ import plotly.offline as pyo
 from app import check_data, pull_data
 
 KST = timezone(timedelta(hours=9))
-HERE = Path(__file__).parent
+# __file__ only exists when this runs as an actual .py script (which is how
+# the scheduler will call it); it's undefined in a notebook cell, so fall
+# back to the current working directory there
+HERE = Path(__file__).parent if "__file__" in globals() else Path.cwd()
 TEMPLATE_PATH = HERE / "dc_ocap_template.html"
 OUTPUT_PATH = HERE / "dc_ocap.html"
 
