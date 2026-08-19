@@ -1,14 +1,16 @@
 """OCAP hold dashboard.
 
 Left: the selected product's hold list (dc_uly / dc_sol / dc_tts),
-newest first, single-row selectable, with a ULY/SOL/TTS switch.
-Right (top 2/3): scatter of the selected hold's item across that
-product's trend dataframe (uly_trend / sol_trend / tts_trend), with
-UCL/LCL (blue) and USL/LSL (red) reference lines. The held wafer is
-red ("{root_lot_id} #{wafer_id}" legend entry); with no legend field
-chosen, other wafers from the same lot are a darker gray than the rest.
-Right (bottom 1/3): a comment plus a Flow/Retest/Hold disposition for
-the selected hold, saved to comments.csv.
+grouped to one row per lot_id, newest first, single-row selectable,
+with a ULY/SOL/TTS switch.
+Right (top 2/3): scatter of one measurement item across that product's
+trend dataframe (uly_trend / sol_trend / tts_trend), with UCL/LCL
+(blue) and USL/LSL (red) reference lines. Every wafer held for that
+item is red under a single legend entry; with no legend field chosen,
+other wafers from the same lot are a darker gray than the rest. The
+arrows step through the lot's items one at a time.
+Right (bottom 1/3): the disposition recorded in the company system and
+merged into dc -- comment, then owner and code -- shown read-only.
 
 ======================================================================
 DATA PREP (mock — stands in for the real pull, which can't be shared
@@ -45,6 +47,28 @@ HOLD_REASONS = [
     "SUDDEN SHIFT",
     "MEASUREMENT DELAY",
 ]
+
+# merged in from the company system alongside owner/code/comment
+OWNER_DEPTS = ["품질기술팀", "공정기술팀", "설비기술팀", "수율개선팀"]
+OWNER_NAMES = ["김민준", "이서연", "박지훈", "최수빈", "정하늘", "강도윤"]
+CODES = ["Flow", "Retest", "Hold"]
+COMMENTS_BY_CODE = {
+    "Flow": [
+        "재측정 결과 규격 내 확인, 진행 조치함",
+        "설비 계측 오차로 판단됨. 후속 lot 정상 확인되어 flow 처리",
+        "single point 이탈이며 경향성 없음. 진행",
+    ],
+    "Retest": [
+        "측정값 이상으로 재측정 요청",
+        "probe card 접촉 불량 의심되어 재측정 진행",
+        "동일 조건 재측정 후 재판정 예정",
+    ],
+    "Hold": [
+        "규격 이탈 확인. 공정팀 원인 분석 요청",
+        "연속 이탈 경향 확인되어 hold 유지",
+        "설비 이상 이력과 연계 확인 필요. hold 유지",
+    ],
+}
 
 PROBE_CARD_IDS = [f"PC{n:03d}" for n in range(1, 9)]
 EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
@@ -90,10 +114,12 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     n_base = max(1, round(n_rows / EXPECTED_CHAIN_LEN))
 
     n_lots = max(1, n_base // 5)
+    # a set of strings iterates in a process-dependent order, which would
+    # make the "seeded" mock differ on every run; sort to pin it down
     root_lot_ids = set()
     while len(root_lot_ids) < n_lots:
         root_lot_ids.add("".join(rng.choice(LOT_ID_CHARS, size=5)))
-    root_lot_ids = list(root_lot_ids)
+    root_lot_ids = sorted(root_lot_ids)
     wafer_pool = [(lot, w) for lot in root_lot_ids for w in range(1, 26)]
     rng.shuffle(wafer_pool)
     base_wafers = wafer_pool[: min(n_base, len(wafer_pool))]
@@ -152,41 +178,62 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     item_cols = [c for c in trend_df.columns if c.startswith("item")]
 
     rows = []
-    for _ in range(n_rows):
-        src = base_rows.iloc[rng.integers(0, len(base_rows))]
-        item_id = rng.choice(item_cols)
+    # holds arrive as lots, not as single wafers: one lot_id covers several
+    # wafers and often several measurement items, which is what the
+    # dashboard groups on
+    while len(rows) < n_rows:
+        src_lot = base_rows.iloc[rng.integers(0, len(base_rows))]["root_lot_id"]
+        lot_rows = base_rows[base_rows["root_lot_id"] == src_lot]
+        lot_id = f"{src_lot}.{rng.integers(1, 9)}"
+        hold_time = _random_datetime(rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), 1).iloc[0]
 
-        spread = cfg["spread"]
-        base = rng.normal(loc=cfg["center"], scale=spread)
-        usl = base + rng.uniform(spread * 1.5, spread * 2.5)
-        lsl = base - rng.uniform(spread * 1.5, spread * 2.5)
-        ucl = base + rng.uniform(spread * 0.6, spread * 1.2)
-        lcl = base - rng.uniform(spread * 0.6, spread * 1.2)
+        n_waf = min(int(rng.integers(1, 6)), len(lot_rows))
+        wafers = rng.choice(lot_rows["wafer_id"].unique(), size=min(n_waf, lot_rows["wafer_id"].nunique()), replace=False)
+        items = rng.choice(item_cols, size=int(rng.integers(1, 4)), replace=False)
 
-        rows.append(
-            {
-                "root_lot_id": src["root_lot_id"],
-                "wafer_id": src["wafer_id"],
-                "item_id": item_id,
-                "hold_inform": rng.choice(HOLD_REASONS),
-                "ucl": round(ucl, 3),
-                "lcl": round(lcl, 3),
-                "usl": round(usl, 3),
-                "lsl": round(lsl, 3),
-                "step_seq": int(rng.integers(10, 500)),
-                "line_id": rng.choice(LINE_IDS),
-                "process_id": cfg["process_id"],
-                "sub_item_id": f"{item_id}_{rng.integers(1, 4)}",
-            }
-        )
+        owner = f"{rng.choice(OWNER_DEPTS)} {rng.choice(OWNER_NAMES)}"
+        code = rng.choice(CODES, p=[0.55, 0.3, 0.15])
+        comment = rng.choice(COMMENTS_BY_CODE[code])
 
-    dc_df = pd.DataFrame(rows)
-    dc_df["hold_time"] = _random_datetime(
-        rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), n_rows
-    ).sort_values().reset_index(drop=True)
+        for item_id in items:
+            spread = cfg["spread"]
+            base = rng.normal(loc=cfg["center"], scale=spread)
+            usl = base + rng.uniform(spread * 1.5, spread * 2.5)
+            lsl = base - rng.uniform(spread * 1.5, spread * 2.5)
+            ucl = base + rng.uniform(spread * 0.6, spread * 1.2)
+            lcl = base - rng.uniform(spread * 0.6, spread * 1.2)
+            hold_inform = rng.choice(HOLD_REASONS)
+            step_seq = int(rng.integers(10, 500))
+            line_id = rng.choice(LINE_IDS)
 
-    return dc_df[
+            for wafer_id in wafers:
+                rows.append(
+                    {
+                        "lot_id": lot_id,
+                        "root_lot_id": src_lot,
+                        "wafer_id": wafer_id,
+                        "hold_time": hold_time,
+                        "item_id": item_id,
+                        "hold_inform": hold_inform,
+                        "ucl": round(ucl, 3),
+                        "lcl": round(lcl, 3),
+                        "usl": round(usl, 3),
+                        "lsl": round(lsl, 3),
+                        "step_seq": step_seq,
+                        "line_id": line_id,
+                        "process_id": cfg["process_id"],
+                        "sub_item_id": f"{item_id}_{rng.integers(1, 4)}",
+                        # merged in from the company system, where the
+                        # disposition is actually recorded
+                        "owner": owner,
+                        "code": code,
+                        "comment": comment,
+                    }
+                )
+
+    return pd.DataFrame(rows)[
         [
+            "lot_id",
             "root_lot_id",
             "wafer_id",
             "hold_time",
@@ -200,6 +247,9 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             "line_id",
             "process_id",
             "sub_item_id",
+            "owner",
+            "code",
+            "comment",
         ]
     ]
 
@@ -247,13 +297,64 @@ KST = timezone(timedelta(hours=9))
 # columns the dashboard below reads; anything missing would otherwise
 # surface as a KeyError deep in a callback
 DC_REQUIRED = [
-    "root_lot_id", "wafer_id", "hold_time", "item_id",
+    "lot_id", "root_lot_id", "wafer_id", "hold_time", "item_id",
     "hold_inform", "ucl", "lcl", "usl", "lsl", "line_id", "process_id",
+    # merged in from the company system, where the disposition is recorded
+    "owner", "code", "comment",
 ]
 TREND_REQUIRED = [
     "root_lot_id", "wafer_id", "tkout_time",
     "probe_card_id", "eqp_id", "lot_type", "rw_cnt",
 ]
+# the grouped hold list shown on the left, one row per lot_id
+GROUP_COLS = ["hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
+
+
+def sort_wafers(values) -> list:
+    """Wafer numbers in numeric order, with any non-numeric ones last."""
+    normed = {norm_wafer(v) for v in values}
+    nums = sorted(v for v in normed if isinstance(v, int))
+    rest = sorted(str(v) for v in normed if not isinstance(v, int))
+    return nums + rest
+
+
+def summarize(values) -> str:
+    """'item1' for one distinct value, 'item1외 2건' for several."""
+    seen = list(dict.fromkeys(str(v) for v in values))
+    if not seen:
+        return ""
+    return seen[0] if len(seen) == 1 else f"{seen[0]}외 {len(seen) - 1}건"
+
+
+def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse the hold list to one row per lot_id.
+
+    A single lot is held as one event covering several wafers and often
+    several measurement items, so showing one row per (wafer, item) buries
+    the engineer in near-duplicate rows. Wafers are listed out ("2,3,4")
+    since the count is small and it says which wafers are affected; items
+    are summarized ("item1외 2건") because the chart pages through them
+    one at a time anyway.
+    """
+    if dc_df.empty or "lot_id" not in dc_df.columns:
+        return pd.DataFrame(columns=GROUP_COLS)
+
+    rows = []
+    for lot_id, grp in dc_df.groupby("lot_id", dropna=False, sort=False):
+        rows.append({
+            "hold_time": grp["hold_time"].max(),
+            "lot_id": lot_id,
+            "wafer_id": ",".join(str(w) for w in sort_wafers(grp["wafer_id"])),
+            "item": summarize(grp["item_id"]),
+            "hold_inform": summarize(grp["hold_inform"]),
+            "code": summarize(grp["code"]),
+            "owner": summarize(grp["owner"]),
+        })
+    return (
+        pd.DataFrame(rows)
+        .sort_values("hold_time", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def norm_lot(value) -> str:
@@ -466,14 +567,6 @@ CATEGORY_COLORS = [
     "#6baed6", "#c7e9c0", "#525252", "#f7b6d2", "#dbdb8d",
 ]
 
-COMMENTS_PATH = Path(__file__).parent / "comments.csv"
-COMMENT_COLS = [
-    "product", "root_lot_id", "wafer_id", "item_id", "hold_time",
-    "comment", "status", "saved_at",
-]
-STATUS_OPTIONS = ["Flow", "Retest", "Hold"]
-
-
 def find_trend_df(product: str, item_id: str):
     """Return (trend dataframe, its column for item_id), or (None, None).
 
@@ -493,9 +586,15 @@ def find_trend_df(product: str, item_id: str):
     return tdf, item_col
 
 
-def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: int,
+def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
                    legend_field: str | None, ucl, lcl, usl, lsl,
                    chart_height: int) -> go.Figure:
+    """Scatter one measurement item over time.
+
+    `bad_pairs` is the set of normalized (root_lot_id, wafer_id) pairs
+    held for this item -- a lot is held as a whole, so several wafers are
+    highlighted together under one legend entry rather than one each.
+    """
     ucl, lcl, usl, lsl = to_float(ucl), to_float(lcl), to_float(usl), to_float(lsl)
 
     # coerce before dropna: a numeric column that came back as text/object
@@ -506,13 +605,12 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
-    is_bad_row = (
-        plot_df["root_lot_id"].map(norm_lot).eq(norm_lot(bad_root_lot_id))
-        & plot_df["wafer_id"].map(norm_wafer).eq(norm_wafer(bad_wafer_id))
-    )
+    row_pairs = list(zip(plot_df["root_lot_id"].map(norm_lot),
+                         plot_df["wafer_id"].map(norm_wafer)))
+    is_bad_row = pd.Series([p in bad_pairs for p in row_pairs], index=plot_df.index)
+    bad_lots = {lot for lot, _ in bad_pairs}
     others = plot_df[~is_bad_row]
     bad = plot_df[is_bad_row]
-    bad_label = f"{bad_root_lot_id} #{bad_wafer_id}"
 
     fig = go.Figure()
 
@@ -539,9 +637,11 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
         )
 
     if legend_field is None:
-        same_lot_mask = others["root_lot_id"] == bad_root_lot_id
+        # other wafers from the held lot(s) are the most useful comparison,
+        # so they get a darker gray than the rest of the population
+        same_lot_mask = others["root_lot_id"].map(norm_lot).isin(bad_lots)
         add_group(others[~same_lot_mask], "lightgray", "other")
-        add_group(others[same_lot_mask], "dimgray", bad_root_lot_id)
+        add_group(others[same_lot_mask], "dimgray", ",".join(sorted(bad_lots)))
     else:
         # dropna=False: rows whose legend field is blank would otherwise be
         # dropped from every group and silently vanish from the chart
@@ -580,68 +680,6 @@ def build_scatter(trend_df, item_id: str, bad_root_lot_id: str, bad_wafer_id: in
     return fig
 
 
-def hold_key(product: str, sel: pd.Series) -> dict:
-    """Identify one hold event.
-
-    product and hold_time are both part of the key: item ids (item1,
-    item2, ...) repeat across products, and the same wafer/item can be
-    held again on a later date -- keying on lot/wafer/item alone would
-    make those distinct holds share (and overwrite) one comment.
-    Everything is stringified so it survives the CSV round trip; an
-    all-digit root_lot_id would otherwise come back as an int and stop
-    matching.
-    """
-    return {
-        "product": str(product),
-        "root_lot_id": norm_lot(sel["root_lot_id"]),
-        "wafer_id": str(norm_wafer(sel["wafer_id"])),
-        "item_id": str(sel["item_id"]).strip().lower(),
-        "hold_time": str(sel["hold_time"]),
-    }
-
-
-def load_comments() -> pd.DataFrame:
-    """Read comments.csv, normalized to COMMENT_COLS.
-
-    Everything is read as text so key columns compare cleanly against
-    hold_key(); missing columns (e.g. a file written before `status` or
-    `product` existed) are added empty, and blanks that come back as NaN
-    are normalized to "" so they don't render as the string "nan".
-    """
-    if not COMMENTS_PATH.exists():
-        return pd.DataFrame(columns=COMMENT_COLS)
-
-    comments_df = pd.read_csv(COMMENTS_PATH, dtype=str).fillna("")
-    for col in COMMENT_COLS:
-        if col not in comments_df.columns:
-            comments_df[col] = ""
-    return comments_df
-
-
-def match_comment(comments_df: pd.DataFrame, key: dict) -> pd.Series:
-    """Boolean mask of the rows in comments_df belonging to `key`."""
-    if comments_df.empty:
-        return pd.Series(False, index=comments_df.index, dtype=bool)
-    mask = pd.Series(True, index=comments_df.index)
-    for col, val in key.items():
-        mask &= comments_df[col].astype(str) == val
-    return mask
-
-
-def save_comment(key: dict, comment_text: str, status: str) -> None:
-    comments_df = load_comments()
-    mask = match_comment(comments_df, key)
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-    if mask.any():
-        comments_df.loc[mask, "comment"] = comment_text
-        comments_df.loc[mask, "status"] = status
-        comments_df.loc[mask, "saved_at"] = now
-    else:
-        new_row = pd.DataFrame([{**key, "comment": comment_text, "status": status, "saved_at": now}])
-        comments_df = pd.concat([comments_df, new_row], ignore_index=True)
-    comments_df.to_csv(COMMENTS_PATH, index=False)
-
-
 st.markdown(
     f"# Hold 현황 "
     f"<span style='font-size:0.42em; font-weight:400; color:#888;'>"
@@ -654,12 +692,6 @@ TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
 COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
 
 left, right = st.columns([2, 3])
-
-DC_COLS = [
-    "root_lot_id", "wafer_id", "hold_time", "item_id", "hold_inform",
-    "ucl", "lcl", "usl", "lsl", "step_seq", "line_id", "process_id", "sub_item_id",
-]
-display_cols = ["hold_time", "root_lot_id", "wafer_id", "item_id", "hold_inform", "line_id", "process_id"]
 
 with left:
     title_col, switch_col = st.columns([2, 2])
@@ -676,13 +708,12 @@ with left:
 
     dc_df = PRODUCT_DC[selected_product]
     if dc_df is None or dc_df.empty or "hold_time" not in dc_df.columns:
-        dc_sorted = pd.DataFrame(columns=DC_COLS)
+        dc_df = pd.DataFrame(columns=DC_REQUIRED)
         st.caption(f"{selected_product}: 현재 hold 건이 없습니다.")
-    else:
-        dc_sorted = dc_df.sort_values("hold_time", ascending=False).reset_index(drop=True)
+    grouped = group_holds(dc_df)
 
     event = st.dataframe(
-        dc_sorted[display_cols],
+        grouped[GROUP_COLS],
         width="stretch",
         hide_index=True,
         on_select="rerun",
@@ -694,64 +725,86 @@ with left:
 
 with right:
     st.subheader("Item Trend")
-    sel = dc_sorted.iloc[selected_rows[0]] if selected_rows else None
     product = selected_product
-    tdf, item_col = find_trend_df(product, sel["item_id"]) if sel is not None else (None, None)
+
+    lot_id = grouped.iloc[selected_rows[0]]["lot_id"] if selected_rows else None
+    lot_rows = dc_df[dc_df["lot_id"] == lot_id] if lot_id is not None else None
+
+    # one chart per measurement item, stepped through with the arrows
+    items = list(dict.fromkeys(lot_rows["item_id"])) if lot_rows is not None else []
+    nav_key = f"item_idx_{selected_product}_{lot_id}"
+    item_idx = min(st.session_state.get(nav_key, 0), max(len(items) - 1, 0))
+    item_id = items[item_idx] if items else None
+
+    tdf, item_col = find_trend_df(product, item_id) if item_id is not None else (None, None)
 
     with st.container(height=TREND_HEIGHT, border=True):
-        if sel is None:
+        if lot_id is None:
             st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
-        elif tdf is None:
-            st.warning("매칭되는 trend 데이터를 찾지 못했습니다.")
         else:
-            legend_spacer, legend_col = st.columns([4, 1])
+            nav_prev, nav_label, nav_next, nav_gap, legend_col = st.columns([0.6, 2.2, 0.6, 3.5, 2])
+            with nav_prev:
+                if st.button("◀", key=f"prev_{nav_key}", disabled=item_idx == 0, width="stretch"):
+                    st.session_state[nav_key] = item_idx - 1
+                    st.rerun()
+            with nav_label:
+                st.markdown(
+                    f"<div style='text-align:center; padding-top:0.35rem;'>"
+                    f"<b>{item_id}</b> <span style='color:#888;'>({item_idx + 1}/{len(items)})</span></div>",
+                    unsafe_allow_html=True,
+                )
+            with nav_next:
+                if st.button("▶", key=f"next_{nav_key}", disabled=item_idx >= len(items) - 1, width="stretch"):
+                    st.session_state[nav_key] = item_idx + 1
+                    st.rerun()
             with legend_col:
-                legend_label = st.selectbox("Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0)
+                legend_label = st.selectbox(
+                    "Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0, label_visibility="collapsed"
+                )
             legend_field = LEGEND_FIELD_OPTIONS[legend_label]
 
-            if tdf[item_col].notna().sum() == 0:
-                st.warning(f"{sel['item_id']} 은(는) 이 제품 trend 에 측정값이 없습니다.")
+            if tdf is None:
+                st.warning(f"{item_id} 에 매칭되는 trend 데이터를 찾지 못했습니다.")
+            else:
+                # only the wafers held for THIS item are the excursion
+                item_rows = lot_rows[lot_rows["item_id"] == item_id]
+                bad_pairs = set(zip(item_rows["root_lot_id"].map(norm_lot),
+                                    item_rows["wafer_id"].map(norm_wafer)))
+                wafer_list = ",".join(str(w) for w in sort_wafers(item_rows["wafer_id"]))
+                limits = item_rows.iloc[0]
 
-            fig = build_scatter(
-                tdf, item_col, sel["root_lot_id"], sel["wafer_id"], legend_field,
-                sel["ucl"], sel["lcl"], sel["usl"], sel["lsl"],
-                chart_height=TREND_HEIGHT - 150,
-            )
-            st.plotly_chart(fig, width="stretch")
-            st.caption(
-                f"제품: {product} · root_lot_id: {sel['root_lot_id']} · "
-                f"wafer_id: {sel['wafer_id']} · item: {sel['item_id']}"
-            )
+                if tdf[item_col].notna().sum() == 0:
+                    st.warning(f"{item_id} 은(는) 이 제품 trend 에 측정값이 없습니다.")
+
+                fig = build_scatter(
+                    tdf, item_col, bad_pairs, f"{lot_id} #{wafer_list}", legend_field,
+                    limits["ucl"], limits["lcl"], limits["usl"], limits["lsl"],
+                    chart_height=TREND_HEIGHT - 150,
+                )
+                st.plotly_chart(fig, width="stretch")
+                st.caption(
+                    f"제품: {product} · lot_id: {lot_id} · "
+                    f"wafer_id: {wafer_list} · item: {item_id}"
+                )
 
     with st.container(height=COMMENT_HEIGHT, border=True):
-        if sel is None or tdf is None:
+        if lot_id is None:
             st.caption("Comment")
         else:
-            key = hold_key(product, sel)
-            comments_df = load_comments()
-            mask = match_comment(comments_df, key)
-            existing_comment = comments_df.loc[mask, "comment"].iloc[-1] if mask.any() else ""
-            existing_status = comments_df.loc[mask, "status"].iloc[-1] if mask.any() else None
-            existing_status = existing_status if existing_status in STATUS_OPTIONS else None
-            comment_key = "_".join(key.values())
-
-            comment_text = st.text_area(
-                "Comment", value=existing_comment, height=COMMENT_HEIGHT - 110, key=f"comment_input_{comment_key}"
+            # the disposition is recorded in the company system and merged
+            # into dc, so it is shown read-only rather than edited here
+            item_rows = lot_rows[lot_rows["item_id"] == item_id] if item_id else lot_rows
+            st.text_area(
+                "Comment",
+                value="\n".join(dict.fromkeys(str(c) for c in item_rows["comment"])),
+                height=COMMENT_HEIGHT - 130,
+                disabled=True,
+                key=f"comment_view_{nav_key}_{item_idx}",
             )
-            # status sits just left of the save button, one button-width apart;
-            # the save button stretches so its right edge lines up with the
-            # comment box above it
-            row_spacer, row_status, row_save = st.columns([5.9, 3, 1])
-            with row_status:
-                status_choice = st.segmented_control(
-                    "Status", STATUS_OPTIONS, default=existing_status,
-                    label_visibility="collapsed", key=f"status_input_{comment_key}",
-                )
-            with row_save:
-                save_clicked = st.button("저장", key=f"save_btn_{comment_key}", width="stretch")
-            if save_clicked:
-                if status_choice is None:
-                    st.error("Flow / Retest / Hold 중 하나를 선택해주세요.")
-                else:
-                    save_comment(key, comment_text, status_choice)
-                    st.success("저장되었습니다.")
+            st.markdown(
+                f"<div style='font-size:0.9em; line-height:1.7;'>"
+                f"<b>owner</b> &nbsp;{' / '.join(dict.fromkeys(str(o) for o in item_rows['owner']))}<br>"
+                f"<b>code</b> &nbsp;&nbsp;{' / '.join(dict.fromkeys(str(c) for c in item_rows['code']))}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
