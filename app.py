@@ -575,14 +575,17 @@ HOVER_TEMPLATE = (
     "rw_cnt=%{customdata[5]}<extra></extra>"
 )
 
-# red is reserved for the held wafer, so it is kept out of this palette.
-# 20 entries so a high-cardinality field (many probe cards / eqp ids in the
+# red means "past the scrap limit" and blue "past the control limit", so
+# both hues -- and anything close enough to be mistaken for them at marker
+# size, like orange or light blue -- are kept out of this palette. 20
+# entries so a high-cardinality field (many probe cards / eqp ids in the
 # queried window) doesn't wrap onto a duplicate color too quickly.
+LIMIT_COLORS = {"scrap": "red", "control": "blue"}
 CATEGORY_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
-    "#17becf", "#bcbd22", "#7f7f7f", "#e377c2", "#aec7e8",
-    "#3182bd", "#fdae6b", "#74c476", "#9e9ac8", "#a1866f",
-    "#6baed6", "#c7e9c0", "#525252", "#f7b6d2", "#dbdb8d",
+    "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
+    "#e377c2", "#7f7f7f", "#1b9e77", "#a6761d", "#66a61e",
+    "#5d4037", "#8e6c8a", "#93a01e", "#4d4d4d", "#c49a6c",
+    "#7fbf7b", "#af8dc3", "#d9a441", "#2f6f4e", "#6b4f8a",
 ]
 
 def find_trend_df(product: str, item_id: str):
@@ -609,9 +612,11 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
                    chart_height: int) -> go.Figure:
     """Scatter one measurement item over time.
 
-    `bad_pairs` is the set of normalized (root_lot_id, wafer_id) pairs
-    held for this item -- a lot is held as a whole, so several wafers are
-    highlighted together under one legend entry rather than one each.
+    `bad_pairs` is the set of normalized (root_lot_id, wafer_id) pairs held
+    for this item -- a lot is held as a whole, so its wafers are
+    highlighted together rather than one legend entry each. Those held
+    wafers are then split by which limit they broke; `bad_label` is the
+    lot id the entries are named after.
     """
     ucl, lcl, usl, lsl = to_float(ucl), to_float(lcl), to_float(usl), to_float(lsl)
 
@@ -627,16 +632,35 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
                          plot_df["wafer_id"].map(norm_wafer)))
     is_bad_row = pd.Series([p in bad_pairs for p in row_pairs], index=plot_df.index)
     bad_lots = {lot for lot, _ in bad_pairs}
+
+    # a point past the scrap limit is necessarily past the control limit
+    # too, so scrap wins and the two groups stay disjoint
+    values = plot_df[item_id]
+    past_scrap = pd.Series(False, index=plot_df.index)
+    if usl is not None:
+        past_scrap |= values > usl
+    if lsl is not None:
+        past_scrap |= values < lsl
+    past_control = pd.Series(False, index=plot_df.index)
+    if ucl is not None:
+        past_control |= values > ucl
+    if lcl is not None:
+        past_control |= values < lcl
+    past_control &= ~past_scrap
+
     others = plot_df[~is_bad_row]
     bad = plot_df[is_bad_row]
+    in_spec = ~(past_scrap | past_control)
 
     fig = go.Figure()
 
-    def add_group(grp: pd.DataFrame, color: str, name: str, is_bad: bool = False) -> None:
+    def add_group(grp: pd.DataFrame, color: str, name: str, rank: int, is_bad: bool = False) -> None:
         if grp.empty:
             return
+        # held wafers keep the bigger outlined marker so they stay findable;
+        # their fill says which limit the point broke
         marker = (
-            dict(color="red", size=11, line=dict(width=1, color="black"))
+            dict(color=color, size=11, line=dict(width=1, color="black"))
             if is_bad
             else dict(color=color, size=7)
         )
@@ -648,7 +672,7 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
                 # the held wafer is added last so it draws on top, but ranks
                 # first in the legend: with many categories plotly clips the
                 # legend, and this entry must never be the one cut off
-                legendrank=1 if is_bad else 1000 + len(fig.data),
+                legendrank=rank,
                 customdata=grp[HOVER_COLS].values,
                 hovertemplate=HOVER_TEMPLATE,
             )
@@ -658,21 +682,28 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
         # other wafers from the held lot(s) are the most useful comparison,
         # so they get a darker gray than the rest of the population
         same_lot_mask = others["root_lot_id"].map(norm_lot).isin(bad_lots)
-        add_group(others[~same_lot_mask], "lightgray", "other")
-        add_group(others[same_lot_mask], "dimgray", ",".join(sorted(bad_lots)))
+        add_group(others[~same_lot_mask], "lightgray", "other", rank=1100)
+        add_group(others[same_lot_mask], "dimgray", ",".join(sorted(bad_lots)), rank=1050)
     else:
         # dropna=False: rows whose legend field is blank would otherwise be
         # dropped from every group and silently vanish from the chart
         for i, (cat_val, grp) in enumerate(others.groupby(legend_field, dropna=False)):
             label = "(없음)" if pd.isna(cat_val) else str(cat_val)
-            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], label)
+            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], label, rank=1000 + i)
 
-    if legend_field is None:
-        add_group(bad, None, bad_label, is_bad=True)
-    else:
-        for cat_val, grp in bad.groupby(legend_field, dropna=False):
-            label = "(없음)" if pd.isna(cat_val) else str(cat_val)
-            add_group(grp, None, f"{bad_label}_{label}", is_bad=True)
+    # the held wafers are split by which limit they broke -- that judgement
+    # is what the engineer is here to make. Scrap outranks control in the
+    # legend, and a held wafer inside both limits (held on a trend rule or
+    # an equipment alarm) is drawn hollow rather than given a limit color.
+    def add_bad(subset: pd.DataFrame, color: str, suffix: str, rank: int) -> None:
+        if subset.empty:
+            return
+        wafers = ",".join(str(w) for w in sort_wafers(subset["wafer_id"]))
+        add_group(subset, color, f"{bad_label} #{wafers}{suffix}", rank=rank, is_bad=True)
+
+    add_bad(bad[past_scrap.loc[bad.index]], LIMIT_COLORS["scrap"], " (scrap 이탈)", 1)
+    add_bad(bad[past_control.loc[bad.index]], LIMIT_COLORS["control"], " (control 이탈)", 2)
+    add_bad(bad[in_spec.loc[bad.index]], "white", "", 3)
 
     # skip any limit that didn't parse to a number rather than passing None
     # through to plotly, which errors on a missing y just as it does on a str
@@ -820,7 +851,7 @@ with right:
                     st.warning(f"{item_id} 은(는) 이 제품 trend 에 측정값이 없습니다.")
 
                 fig = build_scatter(
-                    tdf, item_col, bad_pairs, f"{lot_id} #{wafer_list}", legend_field,
+                    tdf, item_col, bad_pairs, str(lot_id), legend_field,
                     limits["ucl"], limits["lcl"], limits["usl"], limits["lsl"],
                     chart_height=TREND_HEIGHT - 150,
                 )
