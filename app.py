@@ -168,9 +168,15 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     """Generate a mock hold-event dataframe for a single product.
 
     Each hold event is tied to a real (root_lot_id, wafer_id, item column)
-    combination sampled from `trend_df` (only rw_cnt=0 rows, since those
-    have every item measured), so it can be looked up in the trend
-    dataframe on the dashboard. process_id is fixed to the product's code.
+    combination sampled from `trend_df`, so it can be looked up in the
+    trend dataframe on the dashboard. process_id is fixed to the product's
+    code.
+
+    rw_cnt says which measurement of that wafer was held (0 = the first
+    test, 1 = the first retest, ...). One hold record carries one comment,
+    so it takes part in the key the company system's comment table joins
+    on -- the same wafer/item held again after a retest is a separate
+    record with its own comment.
     """
     rng = np.random.default_rng(seed)
     cfg = PRODUCT_CONFIG[product]
@@ -207,11 +213,22 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             line_id = rng.choice(LINE_IDS)
 
             for wafer_id in wafers:
+                # point at a measurement that actually exists for this item:
+                # retests only re-measure some items, so not every rw_cnt of
+                # a wafer has a value for the item being held
+                measured = trend_df[
+                    (trend_df["root_lot_id"] == src_lot)
+                    & (trend_df["wafer_id"] == wafer_id)
+                    & trend_df[item_id].notna()
+                ]
+                rw_cnt = int(measured["rw_cnt"].iloc[rng.integers(0, len(measured))]) if len(measured) else 0
+
                 rows.append(
                     {
                         "lot_id": lot_id,
                         "root_lot_id": src_lot,
                         "wafer_id": wafer_id,
+                        "rw_cnt": rw_cnt,
                         "hold_time": hold_time,
                         "item_id": item_id,
                         "hold_inform": hold_inform,
@@ -236,6 +253,7 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             "lot_id",
             "root_lot_id",
             "wafer_id",
+            "rw_cnt",
             "hold_time",
             "item_id",
             "hold_inform",
@@ -297,7 +315,7 @@ KST = timezone(timedelta(hours=9))
 # columns the dashboard below reads; anything missing would otherwise
 # surface as a KeyError deep in a callback
 DC_REQUIRED = [
-    "lot_id", "root_lot_id", "wafer_id", "hold_time", "item_id",
+    "lot_id", "root_lot_id", "wafer_id", "rw_cnt", "hold_time", "item_id",
     "hold_inform", "ucl", "lcl", "usl", "lsl", "line_id", "process_id",
     # merged in from the company system, where the disposition is recorded
     "owner", "code", "comment",
@@ -690,6 +708,11 @@ st.markdown(
 PANEL_HEIGHT = 650
 TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
 COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
+# the left column splits the same total between the grouped list and the
+# breakdown of whichever lot is selected, so both columns still end level
+LIST_HEIGHT = 400
+DETAIL_HEIGHT = PANEL_HEIGHT - LIST_HEIGHT
+DETAIL_COLS = ["wafer_id", "item_id", "rw_cnt", "hold_inform"]
 
 left, right = st.columns([2, 3])
 
@@ -718,16 +741,36 @@ with left:
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        height=PANEL_HEIGHT,
+        height=LIST_HEIGHT,
         key=f"dc_table_{selected_product}",
     )
     selected_rows = event.selection.rows if event and event.selection else []
+
+    # the grouped row only says "item1외 2건", so the selected lot is broken
+    # back out here: which wafer was held on which item, and why
+    sel_lot_id = grouped.iloc[selected_rows[0]]["lot_id"] if selected_rows else None
+    with st.container(height=DETAIL_HEIGHT, border=True):
+        if sel_lot_id is None:
+            st.caption("행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다.")
+        else:
+            detail = dc_df[dc_df["lot_id"] == sel_lot_id].copy()
+            detail["_w"] = detail["wafer_id"].map(norm_wafer).map(
+                lambda v: (0, v) if isinstance(v, int) else (1, str(v))
+            )
+            detail = detail.sort_values(["item_id", "_w"])
+            st.caption(f"{sel_lot_id} · {len(detail)}건")
+            st.dataframe(
+                detail[DETAIL_COLS],
+                width="stretch",
+                hide_index=True,
+                height=DETAIL_HEIGHT - 75,
+            )
 
 with right:
     st.subheader("Item Trend")
     product = selected_product
 
-    lot_id = grouped.iloc[selected_rows[0]]["lot_id"] if selected_rows else None
+    lot_id = sel_lot_id
     lot_rows = dc_df[dc_df["lot_id"] == lot_id] if lot_id is not None else None
 
     # one chart per measurement item, stepped through with the arrows
