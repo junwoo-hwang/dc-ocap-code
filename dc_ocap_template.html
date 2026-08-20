@@ -288,19 +288,12 @@ function formatDisposition(rows) {
   };
 }
 
-// How many wafers are still waiting for a disposition, counted per
-// (lot_id, wafer_id) so one wafer held on three items counts once.
-// "Still waiting" = comment and owner both blank; the company system
-// merge fills them in together once someone has triaged the hold.
+// How many rows the list shows under the "hold" filter: one per lot_id,
+// since that is what the list groups on. Runs the list's own filter
+// rather than re-deriving "untriaged" here, so the header count can
+// never drift from the rows underneath it.
 function countNewHolds(dcRows) {
-  const blank = v => v === null || v === undefined || String(v).trim() === "";
-  const seen = new Set();
-  for (const r of dcRows) {
-    if (blank(r.comment) && blank(r.owner)) {
-      seen.add(String(r.lot_id) + "||" + String(r.wafer_id));
-    }
-  }
-  return seen.size;
+  return new Set(filterByStatus(dcRows, "hold").map(r => String(r.lot_id))).size;
 }
 
 function filterByStatus(dcRows, status) {

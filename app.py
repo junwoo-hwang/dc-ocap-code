@@ -399,23 +399,18 @@ def filter_by_status(dc_df: pd.DataFrame, status: str) -> pd.DataFrame:
     return dc_df[undispositioned] if status == "hold" else dc_df[~undispositioned]
 
 
-def _is_blank(series: pd.Series) -> pd.Series:
-    return series.isna() | (series.astype(str).str.strip() == "")
-
-
 def count_new_holds(dc_df: pd.DataFrame) -> int:
-    """How many wafers are still waiting for a disposition.
+    """How many rows the list shows under the "hold" filter.
 
-    Counted per (lot_id, wafer_id), so one wafer held on three items is
-    one new hold rather than three. "Still waiting" means comment and
-    owner are both blank -- the company system merge fills them in
-    together once someone has triaged the hold.
+    One per lot_id, since that is what the list groups on. Deliberately
+    runs the list's own filter rather than re-deriving "untriaged" here,
+    so the header count can never drift from the rows underneath it --
+    group_holds() emits exactly one row per distinct lot_id of whatever
+    it is given, so counting those ids is the same number.
     """
-    if dc_df.empty or not {"comment", "owner", "lot_id", "wafer_id"} <= set(dc_df.columns):
+    if dc_df.empty or "lot_id" not in dc_df.columns:
         return 0
-    untriaged = _is_blank(dc_df["comment"]) & _is_blank(dc_df["owner"])
-    pairs = dc_df.loc[untriaged, ["lot_id", "wafer_id"]].astype(str)
-    return len(pairs.drop_duplicates())
+    return dc_df.pipe(filter_by_status, "hold")["lot_id"].nunique(dropna=False)
 
 
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
