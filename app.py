@@ -1288,15 +1288,33 @@ def build_dc_ocap_html() -> Path:
     encoded = base64.b64encode(gzip.compress(payload, 9)).decode("ascii")
 
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    html = (
-        template
-        .replace("__GENERATED_AT__", generated_at)
-        .replace("__DATA_B64__", encoded)
-        # embedded rather than loaded from the public CDN: the portal server
-        # or its viewers may not have outbound internet access, only
-        # reachability to wherever this file itself gets hosted
-        .replace("/*__PLOTLY_JS__*/", pyo.offline.get_plotlyjs())
-    )
+
+    def fill(text: str, placeholder: str, value: str) -> str:
+        """Substitute a placeholder, refusing to continue if it isn't there.
+
+        str.replace() on a missing needle is a silent no-op, which is the
+        worst possible outcome here: the build "succeeds" and writes an
+        html file that simply has no data in it, and the failure only
+        shows up later as a null-reference error in the browser. An
+        out-of-date dc_ocap_template.html next to an updated app.py hits
+        exactly this, so fail here instead.
+        """
+        if placeholder not in text:
+            raise SystemExit(
+                f"{TEMPLATE_PATH.name} 에서 '{placeholder}' 를 찾지 못했습니다.\n"
+                f"app.py 와 {TEMPLATE_PATH.name} 의 버전이 서로 다른 것 같습니다 "
+                f"(둘은 같은 커밋의 짝으로 써야 합니다).\n"
+                f"두 파일을 함께 최신으로 받아서 다시 실행하세요."
+            )
+        return text.replace(placeholder, value)
+
+    html = fill(template, "__GENERATED_AT__", generated_at)
+    html = fill(html, "__DATA_B64__", encoded)
+    # embedded rather than loaded from the public CDN: the portal server or
+    # its viewers may not have outbound internet access, only reachability
+    # to wherever this file itself gets hosted
+    html = fill(html, "/*__PLOTLY_JS__*/", pyo.offline.get_plotlyjs())
+
     OUTPUT_PATH.write_text(html, encoding="utf-8")
     size_kb = OUTPUT_PATH.stat().st_size / 1024
     print(f"wrote {OUTPUT_PATH} ({size_kb:.0f} KB)")
