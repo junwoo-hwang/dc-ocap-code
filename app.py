@@ -310,6 +310,8 @@ def pull_data():
 
 # imported here rather than at the top of the file so this section keeps
 # working if the data prep above is replaced wholesale
+import base64
+import gzip
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1250,21 +1252,32 @@ def build_dc_ocap_html() -> Path:
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
 
+    # separators=(",", ":"): json.dumps's default puts a space after every
+    # comma and colon, which adds up across a few hundred thousand values
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # gzip is what actually shrinks this (tabular numbers and repeated ids
+    # compress extremely well); base64 is only the wrapper that lets the
+    # compressed bytes sit inside a text/HTML file. base64 on its own would
+    # make the payload ~33% BIGGER -- it's the pairing that wins. The page
+    # inflates it with the browser's built-in DecompressionStream, so this
+    # still needs no external library.
+    encoded = base64.b64encode(gzip.compress(payload, 9)).decode("ascii")
+
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     html = (
         template
         .replace("__GENERATED_AT__", generated_at)
-        # separators=(",", ":"): json.dumps's default puts a space after
-        # every comma and colon, which adds up across a few hundred
-        # thousand values
-        .replace("/*__DATA_JSON__*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        .replace("__DATA_B64__", encoded)
         # embedded rather than loaded from the public CDN: the portal server
         # or its viewers may not have outbound internet access, only
         # reachability to wherever this file itself gets hosted
         .replace("/*__PLOTLY_JS__*/", pyo.offline.get_plotlyjs())
     )
     OUTPUT_PATH.write_text(html, encoding="utf-8")
-    print(f"wrote {OUTPUT_PATH} ({OUTPUT_PATH.stat().st_size / 1024:.0f} KB)")
+    size_kb = OUTPUT_PATH.stat().st_size / 1024
+    print(f"wrote {OUTPUT_PATH} ({size_kb:.0f} KB)")
+    print(f"  data: {len(payload)/1024:.0f} KB json -> {len(encoded)/1024:.0f} KB gzip+base64 "
+          f"({len(encoded)/len(payload)*100:.0f}%)")
     return OUTPUT_PATH
 
 

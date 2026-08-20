@@ -141,7 +141,12 @@
 </div>
 
 <script>
-const DATA = /*__DATA_JSON__*/null;
+// The dataset ships gzipped and base64-wrapped (see build_dc_ocap_html()),
+// so it arrives as text but has to be inflated before anything can read
+// it. That makes startup async -- DATA stays null until boot() below
+// fills it in, and nothing may touch it before then.
+const DATA_B64 = "__DATA_B64__";
+let DATA = null;
 
 // build_dc_ocap_html() ships dc/trend as {column: [values]} rather than
 // one object per row -- with ~150 days of trend history and 20+ item
@@ -160,8 +165,20 @@ function expandColumnar(colObj) {
   }
   return rows;
 }
-for (const p of Object.keys(DATA.dc)) DATA.dc[p] = expandColumnar(DATA.dc[p]);
-for (const p of Object.keys(DATA.trend)) DATA.trend[p] = expandColumnar(DATA.trend[p]);
+
+async function loadData() {
+  const bin = atob(DATA_B64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  // DecompressionStream is built into the browser -- no library to load,
+  // which matters because this file may be served somewhere with no
+  // outbound internet access
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const parsed = JSON.parse(await new Response(stream).text());
+  for (const p of Object.keys(parsed.dc)) parsed.dc[p] = expandColumnar(parsed.dc[p]);
+  for (const p of Object.keys(parsed.trend)) parsed.trend[p] = expandColumnar(parsed.trend[p]);
+  return parsed;
+}
 
 const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
 const LEGEND_FIELD_OPTIONS = {
@@ -758,7 +775,19 @@ document.getElementById("listSearch").addEventListener("input", (e) => {
   renderAll();
 });
 
-renderAll();
+// nothing above this point may read DATA -- it is null until the gzipped
+// payload finishes inflating
+loadData().then(d => {
+  DATA = d;
+  renderAll();
+}).catch(err => {
+  console.error(err);
+  const why = (typeof DecompressionStream === "undefined")
+    ? "이 브라우저는 압축 해제 기능(DecompressionStream)을 지원하지 않습니다. Chrome 또는 Edge 최신 버전에서 열어주세요."
+    : "데이터를 읽는 중 오류가 발생했습니다: " + err;
+  document.getElementById("app").innerHTML =
+    '<div class="warning-box" style="margin:24px;font-size:1rem;">' + why + "</div>";
+});
 </script>
 </body>
 </html>
