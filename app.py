@@ -1169,7 +1169,7 @@ def show_dc_ocap():
                     focus_rows = lot_rows[lot_rows["item_id"] == item_id] if item_id else lot_rows
 
                 disposition = format_disposition(focus_rows)
-                comment_text, owner_text, code_text = disposition or ("DC OCAP 이력이 없습니다.", "-", "-")
+                comment_text, owner_text, code_text = disposition or ("Comment 이력이 없습니다.", "-", "-")
 
                 comment_key = f"{KEY_PREFIX}comment_view_{nav_key}_{item_idx}_{chart_focus_pair}"
                 st.text_area(

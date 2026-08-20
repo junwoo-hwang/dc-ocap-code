@@ -727,7 +727,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
   commentPanel.appendChild(el("div", { class: "caption", text: "Comment" }));
 
   const disp = formatDisposition(focusRows);
-  const commentText = disp ? disp.comment : "DC OCAP 이력이 없습니다.";
+  const commentText = disp ? disp.comment : "Comment 이력이 없습니다.";
   const ownerText = disp ? disp.owner : "-";
   const codeText = disp ? disp.code : "-";
 
