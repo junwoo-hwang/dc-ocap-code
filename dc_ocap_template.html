@@ -143,6 +143,26 @@
 <script>
 const DATA = /*__DATA_JSON__*/null;
 
+// build_dc_ocap_html() ships dc/trend as {column: [values]} rather than
+// one object per row -- with ~150 days of trend history and 20+ item
+// columns, repeating every column name on every row was most of the
+// file's size. Expand it back into the row-object shape the rest of
+// this file expects, once, up front.
+function expandColumnar(colObj) {
+  const keys = Object.keys(colObj);
+  if (keys.length === 0) return [];
+  const n = colObj[keys[0]].length;
+  const rows = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const row = {};
+    for (const k of keys) row[k] = colObj[k][i];
+    rows[i] = row;
+  }
+  return rows;
+}
+for (const p of Object.keys(DATA.dc)) DATA.dc[p] = expandColumnar(DATA.dc[p]);
+for (const p of Object.keys(DATA.trend)) DATA.trend[p] = expandColumnar(DATA.trend[p]);
+
 const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
 const LEGEND_FIELD_OPTIONS = {
   "없음 (기본)": null,

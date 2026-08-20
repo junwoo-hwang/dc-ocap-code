@@ -1211,8 +1211,15 @@ def _clean(value):
     return value
 
 
-def _records(df: pd.DataFrame) -> list[dict]:
-    return [{k: _clean(v) for k, v in row.items()} for row in df.to_dict(orient="records")]
+def _columns(df: pd.DataFrame) -> dict:
+    """DataFrame -> {column: [values]} instead of a list of one dict per
+    row. Row-shaped JSON repeats every column name on every single row --
+    with ~150 days of trend history and 20+ item columns that repetition
+    is most of the file. Column-shaped JSON writes each name once; the
+    template expands it back into per-row objects client-side (see
+    expandColumnar() in dc_ocap_template.html), so nothing downstream of
+    that expansion has to change."""
+    return {col: [_clean(v) for v in df[col]] for col in df.columns}
 
 
 def build_dc_ocap_html() -> Path:
@@ -1233,8 +1240,8 @@ def build_dc_ocap_html() -> Path:
         )
 
     data = {
-        "dc": {p: _records(product_dc[p]) for p in product_dc},
-        "trend": {p: _records(product_trend[p]) for p in product_trend},
+        "dc": {p: _columns(product_dc[p]) for p in product_dc},
+        "trend": {p: _columns(product_trend[p]) for p in product_trend},
         "itemCols": {
             p: [c for c in product_trend[p].columns if c not in META_TREND_COLS]
             for p in product_trend
@@ -1247,7 +1254,10 @@ def build_dc_ocap_html() -> Path:
     html = (
         template
         .replace("__GENERATED_AT__", generated_at)
-        .replace("/*__DATA_JSON__*/null", json.dumps(data, ensure_ascii=False))
+        # separators=(",", ":"): json.dumps's default puts a space after
+        # every comma and colon, which adds up across a few hundred
+        # thousand values
+        .replace("/*__DATA_JSON__*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         # embedded rather than loaded from the public CDN: the portal server
         # or its viewers may not have outbound internet access, only
         # reachability to wherever this file itself gets hosted
