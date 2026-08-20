@@ -399,6 +399,25 @@ def filter_by_status(dc_df: pd.DataFrame, status: str) -> pd.DataFrame:
     return dc_df[undispositioned] if status == "hold" else dc_df[~undispositioned]
 
 
+def _is_blank(series: pd.Series) -> pd.Series:
+    return series.isna() | (series.astype(str).str.strip() == "")
+
+
+def count_new_holds(dc_df: pd.DataFrame) -> int:
+    """How many wafers are still waiting for a disposition.
+
+    Counted per (lot_id, wafer_id), so one wafer held on three items is
+    one new hold rather than three. "Still waiting" means comment and
+    owner are both blank -- the company system merge fills them in
+    together once someone has triaged the hold.
+    """
+    if dc_df.empty or not {"comment", "owner", "lot_id", "wafer_id"} <= set(dc_df.columns):
+        return 0
+    untriaged = _is_blank(dc_df["comment"]) & _is_blank(dc_df["owner"])
+    pairs = dc_df.loc[untriaged, ["lot_id", "wafer_id"]].astype(str)
+    return len(pairs.drop_duplicates())
+
+
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
     """Collapse the hold list to one row per lot_id.
 
@@ -850,10 +869,20 @@ def show_dc_ocap():
             st.write("- " + p)
         st.stop()
 
+    # both small texts sit inside the h1 so their 0.42em resolves against
+    # the same heading size -- that keeps them identical without having to
+    # hardcode whatever px streamlit's h1 currently renders at
+    meta_style = "font-size:0.42em; font-weight:400; color:#888; line-height:1.35;"
+    new_counts = ", ".join(f"{p} : {count_new_holds(product_dc[p])}건" for p in product_dc)
     st.markdown(
-        f"# Hold 현황 "
-        f"<span style='font-size:0.42em; font-weight:400; color:#888;'>"
-        f"(Latest Data : {data_loaded_at})</span>",
+        f"# <span style='display:flex; align-items:flex-end; justify-content:space-between;'>"
+        f"<span>Hold 현황 "
+        f"<span style='display:inline-block; vertical-align:bottom; {meta_style}'>"
+        f"신규 hold 건수<br>{new_counts}</span></span>"
+        # right-aligned, so it lands on the same edge as the trend panel below
+        f"<span style='{meta_style} white-space:nowrap; padding-left:1rem;'>"
+        f"(Latest Data : {data_loaded_at})</span>"
+        f"</span>",
         unsafe_allow_html=True,
     )
 

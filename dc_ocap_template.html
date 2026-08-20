@@ -11,7 +11,12 @@
     margin: 0; padding: 24px; color: #0f172a; background: #ffffff;
   }
   h1 { margin: 0 0 20px 0; font-size: 2rem; }
-  h1 .ts { font-size: 0.42em; font-weight: 400; color: #888; }
+  /* the counts and the timestamp share one style so they render alike;
+     both live inside the h1 so 0.42em resolves against the same size */
+  h1 .ts { font-size: 0.42em; font-weight: 400; color: #888; line-height: 1.35; }
+  h1 .head-row { display: flex; align-items: flex-end; justify-content: space-between; }
+  h1 .ts.counts { display: inline-block; vertical-align: bottom; }
+  h1 .ts.stamp { white-space: nowrap; padding-left: 1rem; }
   h2 { margin: 0 0 8px 0; font-size: 1.4rem; }
   .layout { display: flex; gap: 24px; align-items: flex-start; }
   .left { flex: 2; min-width: 0; }
@@ -91,7 +96,10 @@
 </head>
 <body>
 <div id="app">
-  <h1>Hold 현황 <span class="ts">(Latest Data : __GENERATED_AT__)</span></h1>
+  <h1><span class="head-row">
+    <span>Hold 현황 <span class="ts counts" id="newHoldCounts"></span></span>
+    <span class="ts stamp">(Latest Data : __GENERATED_AT__)</span>
+  </span></h1>
 
   <div class="layout">
     <div class="left">
@@ -278,6 +286,21 @@ function formatDisposition(rows) {
     owner: owners.length ? owners.join(" / ") : "-",
     code: codes.length ? codes.join(" / ") : "-",
   };
+}
+
+// How many wafers are still waiting for a disposition, counted per
+// (lot_id, wafer_id) so one wafer held on three items counts once.
+// "Still waiting" = comment and owner both blank; the company system
+// merge fills them in together once someone has triaged the hold.
+function countNewHolds(dcRows) {
+  const blank = v => v === null || v === undefined || String(v).trim() === "";
+  const seen = new Set();
+  for (const r of dcRows) {
+    if (blank(r.comment) && blank(r.owner)) {
+      seen.add(String(r.lot_id) + "||" + String(r.wafer_id));
+    }
+  }
+  return seen.size;
 }
 
 function filterByStatus(dcRows, status) {
@@ -779,6 +802,11 @@ document.getElementById("listSearch").addEventListener("input", (e) => {
 // payload finishes inflating
 loadData().then(d => {
   DATA = d;
+  // fixed order matching the product switch, not Object.keys() order
+  const counts = ["ULY", "TTS", "SOL"]
+    .map(p => `${p} : ${countNewHolds(DATA.dc[p] || [])}건`)
+    .join(", ");
+  document.getElementById("newHoldCounts").innerHTML = "신규 hold 건수<br>" + counts;
   renderAll();
 }).catch(err => {
   console.error(err);
