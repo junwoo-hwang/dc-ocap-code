@@ -219,6 +219,7 @@ const state = {
   product: "ULY",
   statusFilter: "hold",
   selectedLotId: null,
+  selectedRwCnt: null,
   itemIdxByKey: {},
   focusedWafer: null, // {product, itemId, rootLotId, waferId}
   legendField: null,
@@ -579,8 +580,10 @@ function renderList(grouped) {
   renderListHeader();
   listBody.innerHTML = "";
   applySearchAndSort(grouped).forEach(row => {
-    const tr = el("tr", { "data-lot-id": row.lot_id });
-    if (row.lot_id === state.selectedLotId) tr.classList.add("selected");
+    const tr = el("tr", { "data-lot-id": row.lot_id, "data-rw-cnt": row.rw_cnt });
+    if (row.lot_id === state.selectedLotId && String(row.rw_cnt) === String(state.selectedRwCnt)) {
+      tr.classList.add("selected");
+    }
     // same cellText() the search goes through, so the two can't drift apart
     LIST_COLS.forEach(col => tr.appendChild(el("td", { text: cellText(row, col) })));
     listBody.appendChild(tr);
@@ -644,12 +647,12 @@ function ensureTrendSkeleton() {
   trendPanel.appendChild(el("div", { class: "caption", id: "chartCaption" }));
 
   prevBtn.addEventListener("click", () => {
-    const key = `${state.product}|${state.selectedLotId}`;
+    const key = `${state.product}|${state.selectedLotId}|${state.selectedRwCnt}`;
     state.itemIdxByKey[key] = Math.max(0, (state.itemIdxByKey[key] ?? 0) - 1);
     renderAll();
   });
   nextBtn.addEventListener("click", () => {
-    const key = `${state.product}|${state.selectedLotId}`;
+    const key = `${state.product}|${state.selectedLotId}|${state.selectedRwCnt}`;
     state.itemIdxByKey[key] = (state.itemIdxByKey[key] ?? 0) + 1;
     renderAll();
   });
@@ -672,17 +675,40 @@ function handleChartClick(clickedRoot, clickedWafer, itemId) {
     normWafer(r.wafer_id) === normWafer(clickedWafer) &&
     String(r.item_id).trim().toLowerCase() === itemKey
   );
-  const clickLotId = clickRows.length ? clickRows[0].lot_id : null;
+  // the same wafer/item can be held twice under the same lot (an original
+  // pass and its rework) -- if the click matches more than one event, stay
+  // on the one already in view rather than jumping away from under the
+  // user; otherwise prefer the most recent rework
+  let clickLotId = null, clickRwCnt = null;
+  if (clickRows.length) {
+    const current = clickRows.find(
+      r => r.lot_id === state.selectedLotId && String(r.rw_cnt) === String(state.selectedRwCnt)
+    );
+    const pick = current || clickRows.slice().sort((a, b) => Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0))[0];
+    clickLotId = pick.lot_id;
+    clickRwCnt = pick.rw_cnt;
+  }
 
-  if (clickLotId !== null && clickLotId !== state.selectedLotId) {
+  if (
+    clickLotId !== null &&
+    (clickLotId !== state.selectedLotId || String(clickRwCnt) !== String(state.selectedRwCnt))
+  ) {
     // only adopt it as the checked list row if it's visible under the
     // current status filter -- otherwise there's no row to check, but the
     // ring/comment below still resolve against the full (unfiltered) set
     const filtered = filterByStatus(fullDc, state.statusFilter);
-    if (filtered.some(r => r.lot_id === clickLotId)) {
-      const newItems = uniqueOrdered(filtered.filter(r => r.lot_id === clickLotId).map(r => r.item_id));
-      state.itemIdxByKey[`${state.product}|${clickLotId}`] = newItems.includes(itemId) ? newItems.indexOf(itemId) : 0;
+    if (filtered.some(r => r.lot_id === clickLotId && String(r.rw_cnt) === String(clickRwCnt))) {
+      // scoped to this event's rw_cnt, not the whole lot_id -- a rework
+      // shares the lot_id with its original hold and must not mix items
+      const newItems = uniqueOrdered(
+        filtered
+          .filter(r => r.lot_id === clickLotId && String(r.rw_cnt) === String(clickRwCnt))
+          .map(r => r.item_id)
+      );
+      state.itemIdxByKey[`${state.product}|${clickLotId}|${clickRwCnt}`] =
+        newItems.includes(itemId) ? newItems.indexOf(itemId) : 0;
       state.selectedLotId = clickLotId;
+      state.selectedRwCnt = clickRwCnt;
     }
   }
   renderAll();
@@ -690,6 +716,7 @@ function handleChartClick(clickedRoot, clickedWafer, itemId) {
 
 function renderTrendAndComment(dcAll, dcFiltered) {
   const lotId = state.selectedLotId;
+  const rwCnt = state.selectedRwCnt;
 
   if (lotId === null) {
     trendPanel.innerHTML = "";
@@ -701,9 +728,12 @@ function renderTrendAndComment(dcAll, dcFiltered) {
 
   ensureTrendSkeleton();
 
-  const lotRows = dcFiltered.filter(r => r.lot_id === lotId);
+  // scoped to the clicked event's rw_cnt too, not just its lot_id -- a
+  // rework shares the lot_id with its original hold, and without this the
+  // item list, control limits and paging state below would mix both events
+  const lotRows = dcFiltered.filter(r => r.lot_id === lotId && String(r.rw_cnt) === String(rwCnt));
   const items = uniqueOrdered(lotRows.map(r => r.item_id));
-  const key = `${state.product}|${lotId}`;
+  const key = `${state.product}|${lotId}|${rwCnt}`;
   let itemIdx = state.itemIdxByKey[key] ?? 0;
   itemIdx = Math.min(itemIdx, Math.max(items.length - 1, 0));
   state.itemIdxByKey[key] = itemIdx;
@@ -820,12 +850,14 @@ document.getElementById("productSwitch").addEventListener("click", (e) => {
   if (!btn) return;
   state.product = btn.dataset.val;
   state.selectedLotId = null;
+  state.selectedRwCnt = null;
   renderAll();
 });
 listBody.addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-lot-id]");
   if (!tr) return;
   state.selectedLotId = tr.dataset.lotId;
+  state.selectedRwCnt = tr.dataset.rwCnt;
   renderAll();
 });
 document.getElementById("listHeaderRow").addEventListener("click", (e) => {

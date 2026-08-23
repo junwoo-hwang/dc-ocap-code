@@ -306,9 +306,13 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     if not df.empty and not (
         df["owner"].isna() & df["status"].astype(str).str.strip().eq("Hold")
     ).any():
-        last_lot = df.loc[df["hold_time"].idxmax(), "lot_id"]
-        df.loc[df["lot_id"] == last_lot, ["owner", "code", "comment"]] = None
-        df.loc[df["lot_id"] == last_lot, "status"] = "Hold"
+        last_idx = df["hold_time"].idxmax()
+        last_lot, last_rw_cnt = df.loc[last_idx, ["lot_id", "rw_cnt"]]
+        # scoped to this one rw_cnt event, not the whole lot_id -- the lot may
+        # have an earlier, already-dispositioned event that must stay intact
+        mask = (df["lot_id"] == last_lot) & (df["rw_cnt"] == last_rw_cnt)
+        df.loc[mask, ["owner", "code", "comment"]] = None
+        df.loc[mask, "status"] = "Hold"
     return df
 
 
@@ -1032,7 +1036,10 @@ def show_dc_ocap():
         table_key = f"{KEY_PREFIX}dc_table_{selected_product}"
         pending_switch = st.session_state.pop(f"{KEY_PREFIX}pending_lot_switch", None)
         if pending_switch and pending_switch.get("product") == selected_product:
-            match_idx = grouped.index[grouped["lot_id"] == pending_switch["lot_id"]]
+            match_idx = grouped.index[
+                (grouped["lot_id"] == pending_switch["lot_id"])
+                & (grouped["rw_cnt"] == pending_switch["rw_cnt"])
+            ]
             if len(match_idx):
                 st.session_state[table_key] = {
                     "selection": {"rows": [int(match_idx[0])], "columns": []}
@@ -1050,8 +1057,12 @@ def show_dc_ocap():
         selected_rows = event.selection.rows if event and event.selection else []
 
         # the grouped row only says "item1외 2건", so the selected lot is broken
-        # back out here: which wafer was held on which item, and why
+        # back out here: which wafer was held on which item, and why. rw_cnt
+        # comes along too -- the same lot_id can have several hold events, and
+        # the trend/limits below must stick to the one that was clicked, not
+        # every event the lot has ever had
         sel_lot_id = grouped.iloc[selected_rows[0]]["lot_id"] if selected_rows else None
+        sel_rw_cnt = grouped.iloc[selected_rows[0]]["rw_cnt"] if selected_rows else None
         with st.container(height=DETAIL_HEIGHT, border=True):
             if sel_lot_id is None:
                 st.caption("행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다.")
@@ -1086,11 +1097,19 @@ def show_dc_ocap():
         product = selected_product
 
         lot_id = sel_lot_id
-        lot_rows = dc_df[dc_df["lot_id"] == lot_id] if lot_id is not None else None
+        rw_cnt = sel_rw_cnt
+        # scoped to the clicked event's rw_cnt too, not just its lot_id -- a
+        # rework shares the lot_id with its original hold, and without this
+        # the item list, control limits and paging state below would mix the
+        # two events together
+        lot_rows = (
+            dc_df[(dc_df["lot_id"] == lot_id) & (dc_df["rw_cnt"] == rw_cnt)]
+            if lot_id is not None else None
+        )
 
         # one chart per measurement item, stepped through with the arrows
         items = list(dict.fromkeys(lot_rows["item_id"])) if lot_rows is not None else []
-        nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{lot_id}"
+        nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{lot_id}_{rw_cnt}"
         item_idx = min(st.session_state.get(nav_key, 0), max(len(items) - 1, 0))
         item_id = items[item_idx] if items else None
 
@@ -1191,20 +1210,42 @@ def show_dc_ocap():
                                 & full_dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(new_wafer))
                                 & full_dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key)
                             ]
-                            click_lot_id = click_rows["lot_id"].iloc[0] if not click_rows.empty else None
-                            if click_lot_id is not None and click_lot_id != lot_id:
+                            # the same wafer/item can be held twice under the
+                            # same lot (an original pass and its rework) -- if
+                            # the click matches more than one event, stay on
+                            # the one already in view rather than jumping away
+                            # from under the user; otherwise prefer the most
+                            # recent rework
+                            if not click_rows.empty:
+                                current = click_rows[
+                                    (click_rows["lot_id"] == lot_id) & (click_rows["rw_cnt"] == rw_cnt)
+                                ]
+                                pick = (
+                                    current if not current.empty
+                                    else click_rows.sort_values("rw_cnt", ascending=False)
+                                )
+                                click_lot_id = pick["lot_id"].iloc[0]
+                                click_rw_cnt = pick["rw_cnt"].iloc[0]
+                            else:
+                                click_lot_id = None
+                                click_rw_cnt = None
+                            if click_lot_id is not None and (click_lot_id, click_rw_cnt) != (lot_id, rw_cnt):
                                 # the list widget was already instantiated this
                                 # run, so its selection can't be seeded until the
                                 # next run - see pending_switch handling above
                                 st.session_state[f"{KEY_PREFIX}pending_lot_switch"] = {
                                     "product": selected_product, "lot_id": click_lot_id,
+                                    "rw_cnt": click_rw_cnt,
                                 }
                                 # keep the same item in view after the switch,
-                                # if the newly-selected lot also holds it
+                                # if the newly-selected lot's event also holds it
                                 new_lot_items = list(dict.fromkeys(
-                                    dc_df[dc_df["lot_id"] == click_lot_id]["item_id"]
+                                    dc_df[
+                                        (dc_df["lot_id"] == click_lot_id)
+                                        & (dc_df["rw_cnt"] == click_rw_cnt)
+                                    ]["item_id"]
                                 ))
-                                new_nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{click_lot_id}"
+                                new_nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{click_lot_id}_{click_rw_cnt}"
                                 st.session_state[new_nav_key] = (
                                     new_lot_items.index(item_id) if item_id in new_lot_items else 0
                                 )
