@@ -124,6 +124,7 @@
         <table class="data-table">
           <thead>
             <tr id="listHeaderRow">
+              <th data-col="rw_cnt">rw_cnt<span class="sort-arrow"></span></th>
               <th data-col="hold_time">hold_time<span class="sort-arrow"></span></th>
               <th data-col="lot_id">lot_id<span class="sort-arrow"></span></th>
               <th data-col="wafer_id">wafer_id<span class="sort-arrow"></span></th>
@@ -224,7 +225,7 @@ const state = {
   sortDir: "desc",
   searchText: "",
 };
-const LIST_COLS = ["hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
+const LIST_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
 
 // ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
 function normLot(v) { return String(v).trim(); }
@@ -305,20 +306,26 @@ function filterByStatus(dcRows, status) {
   return dcRows.filter(r => !undispSet.has(r));
 }
 
+// One row per (lot_id, rw_cnt). rw_cnt is part of the key rather than
+// summarized away: a lot held again after a rework is a separate event
+// with its own hold_time and disposition, so collapsing both into one
+// row would hide the later one entirely.
 function groupHolds(dcRows) {
   const order = [];
   const groups = new Map();
   for (const r of dcRows) {
-    if (!groups.has(r.lot_id)) { groups.set(r.lot_id, []); order.push(r.lot_id); }
-    groups.get(r.lot_id).push(r);
+    const key = String(r.lot_id) + "||" + String(r.rw_cnt ?? "");
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key).push(r);
   }
-  const rows = order.map(lotId => {
-    const grp = groups.get(lotId);
+  const rows = order.map(key => {
+    const grp = groups.get(key);
     let holdTime = null;
     for (const r of grp) { if (r.hold_time && (!holdTime || r.hold_time > holdTime)) holdTime = r.hold_time; }
     return {
+      rw_cnt: grp[0].rw_cnt ?? "",
       hold_time: holdTime,
-      lot_id: lotId,
+      lot_id: grp[0].lot_id,
       wafer_id: sortWafers(grp.map(r => r.wafer_id)).join(","),
       item: summarize(grp.map(r => r.item_id)),
       hold_inform: summarize(grp.map(r => r.hold_inform)),
@@ -326,7 +333,13 @@ function groupHolds(dcRows) {
       owner: summarize(grp.map(r => r.owner)),
     };
   });
-  rows.sort((a, b) => (b.hold_time || "").localeCompare(a.hold_time || ""));
+  // newest first as before; rw_cnt descending breaks ties so a rework
+  // sits above the original even when both carry the same hold_time
+  rows.sort((a, b) => {
+    const t = (b.hold_time || "").localeCompare(a.hold_time || "");
+    if (t !== 0) return t;
+    return Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0);
+  });
   return rows;
 }
 
@@ -515,8 +528,19 @@ function applySearchAndSort(grouped) {
     const col = state.sortCol;
     const dir = state.sortDir === "asc" ? 1 : -1;
     rows = rows.slice().sort((a, b) => {
-      const av = String(a[col] ?? ""), bv = String(b[col] ?? "");
-      return av.localeCompare(bv) * dir;
+      const av = a[col], bv = b[col];
+      // rw_cnt is a number: comparing as text would order 10 before 2
+      const an = Number(av), bn = Number(bv);
+      let cmp;
+      if (av !== null && av !== "" && bv !== null && bv !== ""
+          && Number.isFinite(an) && Number.isFinite(bn)) {
+        cmp = an - bn;
+      } else {
+        cmp = String(av ?? "").localeCompare(String(bv ?? ""));
+      }
+      if (cmp !== 0) return cmp * dir;
+      // same key: keep a rework above its original, as groupHolds ordered it
+      return Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0);
     });
   }
   return rows;
@@ -548,21 +572,27 @@ function renderDetail(dcFiltered) {
     detailPanel.appendChild(el("div", { class: "caption", text: "행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다." }));
     return;
   }
+  // every rw_cnt of the lot, not just the one the clicked row stands for --
+  // seeing the original next to its rework is the point of the breakdown
   const rows = dcFiltered.filter(r => r.lot_id === lotId).slice();
+  // rework on top, then wafers ascending, items grouped per wafer
   rows.sort((a, b) => {
-    const ai = String(a.item_id), bi = String(b.item_id);
-    if (ai !== bi) return ai.localeCompare(bi);
+    const rw = Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0);
+    if (rw !== 0) return rw;
     const wa = normWafer(a.wafer_id), wb = normWafer(b.wafer_id);
     const ta = typeof wa === "number" ? 0 : 1, tb = typeof wb === "number" ? 0 : 1;
     if (ta !== tb) return ta - tb;
-    return ta === 0 ? wa - wb : String(wa).localeCompare(String(wb));
+    if (ta === 0 ? wa !== wb : String(wa) !== String(wb)) {
+      return ta === 0 ? wa - wb : String(wa).localeCompare(String(wb));
+    }
+    return String(a.item_id).localeCompare(String(b.item_id));
   });
   detailPanel.appendChild(el("div", { class: "caption", text: `${lotId} · ${rows.length}건` }));
   const table = el("table", { class: "data-table" });
-  const thead = el("thead", {}, [el("tr", {}, ["wafer_id", "item_id", "rw_cnt", "hold_inform"].map(h => el("th", { text: h })))]);
+  const thead = el("thead", {}, [el("tr", {}, ["rw_cnt", "wafer_id", "item_id", "hold_inform"].map(h => el("th", { text: h })))]);
   const tbody = el("tbody");
   rows.forEach(r => {
-    tbody.appendChild(el("tr", {}, [r.wafer_id, r.item_id, r.rw_cnt, r.hold_inform].map(v => el("td", { text: v ?? "" }))));
+    tbody.appendChild(el("tr", {}, [r.rw_cnt, r.wafer_id, r.item_id, r.hold_inform].map(v => el("td", { text: v ?? "" }))));
   });
   table.appendChild(thead); table.appendChild(tbody);
   detailPanel.appendChild(table);

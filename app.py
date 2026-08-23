@@ -342,8 +342,8 @@ TREND_REQUIRED = [
     "root_lot_id", "wafer_id", "tkout_time",
     "probe_card_id", "eqp_id", "lot_type", "rw_cnt",
 ]
-# the grouped hold list shown on the left, one row per lot_id
-GROUP_COLS = ["hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
+# the grouped hold list shown on the left, one row per (lot_id, rw_cnt)
+GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
 
 
 def sort_wafers(values) -> list:
@@ -402,19 +402,18 @@ def filter_by_status(dc_df: pd.DataFrame, status: str) -> pd.DataFrame:
 def count_new_holds(dc_df: pd.DataFrame) -> int:
     """How many rows the list shows under the "hold" filter.
 
-    One per lot_id, since that is what the list groups on. Deliberately
-    runs the list's own filter rather than re-deriving "untriaged" here,
-    so the header count can never drift from the rows underneath it --
-    group_holds() emits exactly one row per distinct lot_id of whatever
-    it is given, so counting those ids is the same number.
+    Deliberately runs the list's own filter and grouping rather than
+    re-deriving anything here, so the header count can never drift from
+    the rows underneath it -- including after grouping changed from
+    lot_id alone to (lot_id, rw_cnt).
     """
     if dc_df.empty or "lot_id" not in dc_df.columns:
         return 0
-    return dc_df.pipe(filter_by_status, "hold")["lot_id"].nunique(dropna=False)
+    return len(group_holds(filter_by_status(dc_df, "hold")))
 
 
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the hold list to one row per lot_id.
+    """Collapse the hold list to one row per (lot_id, rw_cnt).
 
     A single lot is held as one event covering several wafers and often
     several measurement items, so showing one row per (wafer, item) buries
@@ -422,13 +421,24 @@ def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
     since the count is small and it says which wafers are affected; items
     are summarized ("item1외 2건") because the chart pages through them
     one at a time anyway.
+
+    rw_cnt is part of the key rather than summarized away: a lot held
+    again after a rework is a separate event with its own hold_time and
+    its own disposition, so collapsing both into one row would hide the
+    later one entirely.
     """
     if dc_df.empty or "lot_id" not in dc_df.columns:
         return pd.DataFrame(columns=GROUP_COLS)
 
+    # tolerate dc without rw_cnt rather than dying on the groupby
+    keys = ["lot_id", "rw_cnt"] if "rw_cnt" in dc_df.columns else ["lot_id"]
+
     rows = []
-    for lot_id, grp in dc_df.groupby("lot_id", dropna=False, sort=False):
+    for key, grp in dc_df.groupby(keys, dropna=False, sort=False):
+        lot_id = key[0] if isinstance(key, tuple) else key
+        rw_cnt = key[1] if isinstance(key, tuple) else ""
         rows.append({
+            "rw_cnt": rw_cnt,
             "hold_time": grp["hold_time"].max(),
             "lot_id": lot_id,
             "wafer_id": ",".join(str(w) for w in sort_wafers(grp["wafer_id"])),
@@ -437,9 +447,12 @@ def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
             "code": summarize(grp["code"]),
             "owner": summarize(grp["owner"]),
         })
+    # newest first as before; rw_cnt descending breaks ties so a rework
+    # (rw_cnt 1) sits above the original (rw_cnt 0) even when the company
+    # system stamped both with the same hold_time
     return (
         pd.DataFrame(rows)
-        .sort_values("hold_time", ascending=False)
+        .sort_values(["hold_time", "rw_cnt"], ascending=[False, False])
         .reset_index(drop=True)
     )
 
@@ -914,7 +927,7 @@ def show_dc_ocap():
     # breakdown of whichever lot is selected, so both columns still end level
     LIST_HEIGHT = 400
     DETAIL_HEIGHT = PANEL_HEIGHT - LIST_HEIGHT
-    DETAIL_COLS = ["wafer_id", "item_id", "rw_cnt", "hold_inform"]
+    DETAIL_COLS = ["rw_cnt", "wafer_id", "item_id", "hold_inform"]
     # tracks the last wafer point clicked in the trend chart, independent of
     # any one widget's key, so it survives the list/nav-index switch a click
     # can trigger (which would otherwise remount the chart and lose its own
@@ -991,6 +1004,9 @@ def show_dc_ocap():
             if sel_lot_id is None:
                 st.caption("행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다.")
             else:
+                # every rw_cnt of the lot, not just the one the clicked row
+                # stands for -- seeing the original next to its rework is the
+                # point of the breakdown
                 detail = dc_df[dc_df["lot_id"] == sel_lot_id].copy()
                 # astype(object) first: mapping a category column twice makes
                 # pandas try to rebuild it as a category, and since this map's
@@ -999,7 +1015,10 @@ def show_dc_ocap():
                 detail["_w"] = detail["wafer_id"].astype(object).map(norm_wafer).map(
                     lambda v: (0, v) if isinstance(v, int) else (1, str(v))
                 )
-                detail = detail.sort_values(["item_id", "_w"])
+                # rework on top, then wafers ascending, items grouped per wafer
+                sort_cols = (["rw_cnt"] if "rw_cnt" in detail.columns else []) + ["_w", "item_id"]
+                ascending = ([False] if "rw_cnt" in detail.columns else []) + [True, True]
+                detail = detail.sort_values(sort_cols, ascending=ascending)
                 st.caption(f"{sel_lot_id} · {len(detail)}건")
                 st.dataframe(
                     detail[DETAIL_COLS],
