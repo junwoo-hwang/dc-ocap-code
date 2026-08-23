@@ -297,11 +297,19 @@ function countNewHolds(dcRows) {
   return new Set(filterByStatus(dcRows, "hold").map(r => String(r.lot_id))).size;
 }
 
-function filterByStatus(dcRows, status) {
-  if (status === "전체") return dcRows;
+// "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 'Hold' 인 것.
+// dc 는 30분마다 갱신되지만 owner/comment 는 다음날 아침에야 적재되므로,
+// 코멘트를 달고 flow 시킨 건이 하루 동안 hold 에 남는 것을 막으려면
+// 제때 갱신되는 status 를 같이 봐야 합니다.
+// status 컬럼이 없는 dc 도 그대로 동작하도록, 없으면 code/owner 만 봅니다.
+function filterByStatus(dcRows, view) {
+  if (view === "전체") return dcRows;
   const blank = (v) => v === null || v === undefined || String(v).trim() === "";
-  const undisp = dcRows.filter(r => blank(r.code) && blank(r.owner));
-  if (status === "hold") return undisp;
+  const undisp = dcRows.filter(r =>
+    blank(r.code) && blank(r.owner) &&
+    (r.status === undefined || String(r.status).trim() === "Hold")
+  );
+  if (view === "hold") return undisp;
   const undispSet = new Set(undisp);
   return dcRows.filter(r => !undispSet.has(r));
 }

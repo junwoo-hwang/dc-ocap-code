@@ -207,6 +207,15 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             code = rng.choice(CODES, p=[0.55, 0.3, 0.15])
             comment = rng.choice(COMMENTS_BY_CODE[code])
 
+        # status comes from a separate table that refreshes on time, unlike
+        # owner/comment which only land the next morning. So an untriaged
+        # lot can already have been flowed -- those must drop out of "hold"
+        # straight away rather than sitting there for a day.
+        if owner is None:
+            status = rng.choice(["Hold", "Active", "Run"], p=[0.7, 0.2, 0.1])
+        else:
+            status = rng.choice(["Active", "Run", "Hold"], p=[0.6, 0.3, 0.1])
+
         for item_id in items:
             spread = cfg["spread"]
             base = rng.normal(loc=cfg["center"], scale=spread)
@@ -251,6 +260,8 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
                         "owner": owner,
                         "code": code,
                         "comment": comment,
+                        # from a separate, more frequently refreshed table
+                        "status": status,
                     }
                 )
 
@@ -274,14 +285,19 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             "owner",
             "code",
             "comment",
+            "status",
         ]
     ]
-    # the 0.45 draw above can miss on every lot for an unlucky seed, leaving
-    # nothing undispositioned - force the most recent lot to be one so the
-    # "hold" (미처리) filter always has something to show
-    if df["owner"].notna().all() and not df.empty:
+    # the random draws above can leave nothing that qualifies as "hold" for
+    # an unlucky seed - force the most recent lot to qualify so the default
+    # filter always has something to show. Needs status too, since a lot
+    # that has been flowed is no longer a hold however blank its comment is.
+    if not df.empty and not (
+        df["owner"].isna() & df["status"].astype(str).str.strip().eq("Hold")
+    ).any():
         last_lot = df.loc[df["hold_time"].idxmax(), "lot_id"]
         df.loc[df["lot_id"] == last_lot, ["owner", "code", "comment"]] = None
+        df.loc[df["lot_id"] == last_lot, "status"] = "Hold"
     return df
 
 
@@ -388,15 +404,28 @@ def format_disposition(rows: pd.DataFrame) -> tuple[str, str, str] | None:
     )
 
 
-def filter_by_status(dc_df: pd.DataFrame, status: str) -> pd.DataFrame:
-    """전체: 그대로 반환. hold: code/owner 가 둘 다 비어있는 행만 (아직 미처리).
-    이력: code 또는 owner 중 하나라도 있는 행만 (이미 처리됨)."""
-    if dc_df.empty or status == "전체":
+def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
+    """전체: 그대로 반환. hold: 아직 조치가 안 된 행만. 이력: 나머지 전부.
+
+    "조치가 안 됨" 은 두 가지를 모두 만족해야 합니다:
+      1) code 와 owner 가 둘 다 비어있음 (아직 코멘트가 안 달림)
+      2) status 컬럼이 'Hold' 임 (설비상 아직 잡혀 있음)
+
+    2번이 필요한 이유: dc 는 30분마다 갱신되는데 owner/comment 는 다음날
+    아침에야 적재되기 때문에, 누군가 코멘트를 달고 flow 시켜도 하루 동안
+    hold 에 남아 있게 됩니다. status 는 제때 갱신되므로 이미 flow 된 건
+    (Active / Run 등) 을 그 자리에서 이력으로 넘길 수 있습니다.
+
+    status 컬럼이 없는 dc 도 그대로 동작하도록, 없으면 1번만 봅니다.
+    """
+    if dc_df.empty or view == "전체":
         return dc_df
     code_blank = dc_df["code"].isna() | (dc_df["code"].astype(str).str.strip() == "")
     owner_blank = dc_df["owner"].isna() | (dc_df["owner"].astype(str).str.strip() == "")
     undispositioned = code_blank & owner_blank
-    return dc_df[undispositioned] if status == "hold" else dc_df[~undispositioned]
+    if "status" in dc_df.columns:
+        undispositioned &= dc_df["status"].astype(str).str.strip().eq("Hold")
+    return dc_df[undispositioned] if view == "hold" else dc_df[~undispositioned]
 
 
 def count_new_holds(dc_df: pd.DataFrame) -> int:
