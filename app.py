@@ -359,7 +359,7 @@ TREND_REQUIRED = [
     "probe_card_id", "eqp_id", "lot_type", "rw_cnt",
 ]
 # the grouped hold list shown on the left, one row per (lot_id, rw_cnt)
-GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
+GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner", "status"]
 
 
 def sort_wafers(values) -> list:
@@ -475,6 +475,8 @@ def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
             "hold_inform": summarize(grp["hold_inform"]),
             "code": summarize(grp["code"]),
             "owner": summarize(grp["owner"]),
+            # status may not be in every dc; show it blank rather than dying
+            "status": summarize(grp["status"]) if "status" in grp.columns else "",
         })
     # newest first as before; rw_cnt descending breaks ties so a rework
     # (rw_cnt 1) sits above the original (rw_cnt 0) even when the company

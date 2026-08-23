@@ -132,6 +132,7 @@
               <th data-col="hold_inform">hold_inform<span class="sort-arrow"></span></th>
               <th data-col="code">code<span class="sort-arrow"></span></th>
               <th data-col="owner">owner<span class="sort-arrow"></span></th>
+              <th data-col="status">status<span class="sort-arrow"></span></th>
             </tr>
           </thead>
           <tbody id="listBody"></tbody>
@@ -225,7 +226,7 @@ const state = {
   sortDir: "desc",
   searchText: "",
 };
-const LIST_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
+const LIST_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner", "status"];
 
 // ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
 function normLot(v) { return String(v).trim(); }
@@ -339,6 +340,8 @@ function groupHolds(dcRows) {
       hold_inform: summarize(grp.map(r => r.hold_inform)),
       code: summarize(grp.map(r => r.code)),
       owner: summarize(grp.map(r => r.owner)),
+      // status may not be in every dc; blank rather than "undefined"
+      status: summarize(grp.map(r => r.status)),
     };
   });
   // newest first as before; rw_cnt descending breaks ties so a rework
