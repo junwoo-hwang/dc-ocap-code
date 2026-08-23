@@ -184,14 +184,25 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     item_cols = [c for c in trend_df.columns if c.startswith("item")]
 
     rows = []
+    events = []  # (lot_id, src_lot, hold_time) already emitted, for reworks
     # holds arrive as lots, not as single wafers: one lot_id covers several
     # wafers and often several measurement items, which is what the
     # dashboard groups on
     while len(rows) < n_rows:
-        src_lot = base_rows.iloc[rng.integers(0, len(base_rows))]["root_lot_id"]
-        lot_rows = base_rows[base_rows["root_lot_id"] == src_lot]
-        lot_id = f"{src_lot}.{rng.integers(1, 9)}"
-        hold_time = _random_datetime(rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), 1).iloc[0]
+        # a rework re-holds a lot that was already held: same lot_id, a
+        # later hold_time. That is what produces rw_cnt >= 1 below, and
+        # it has to exist here or the dashboard's rework handling is never
+        # exercised by the mock.
+        if events and rng.random() < 0.25:
+            lot_id, src_lot, prev_time = events[rng.integers(0, len(events))]
+            hold_time = prev_time + timedelta(days=int(rng.integers(2, 10)))
+            lot_rows = base_rows[base_rows["root_lot_id"] == src_lot]
+        else:
+            src_lot = base_rows.iloc[rng.integers(0, len(base_rows))]["root_lot_id"]
+            lot_rows = base_rows[base_rows["root_lot_id"] == src_lot]
+            lot_id = f"{src_lot}.{rng.integers(1, 9)}"
+            hold_time = _random_datetime(rng, datetime(2026, 7, 1), datetime(2026, 8, 14, 23, 59, 59), 1).iloc[0]
+        events.append((lot_id, src_lot, hold_time))
 
         n_waf = min(int(rng.integers(1, 6)), len(lot_rows))
         wafers = rng.choice(lot_rows["wafer_id"].unique(), size=min(n_waf, lot_rows["wafer_id"].nunique()), replace=False)
@@ -228,22 +239,12 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             line_id = rng.choice(LINE_IDS)
 
             for wafer_id in wafers:
-                # point at a measurement that actually exists for this item:
-                # retests only re-measure some items, so not every rw_cnt of
-                # a wafer has a value for the item being held
-                measured = trend_df[
-                    (trend_df["root_lot_id"] == src_lot)
-                    & (trend_df["wafer_id"] == wafer_id)
-                    & trend_df[item_id].notna()
-                ]
-                rw_cnt = int(measured["rw_cnt"].iloc[rng.integers(0, len(measured))]) if len(measured) else 0
-
                 rows.append(
                     {
                         "lot_id": lot_id,
                         "root_lot_id": src_lot,
                         "wafer_id": wafer_id,
-                        "rw_cnt": rw_cnt,
+                        # rw_cnt is filled in below, once every event exists
                         "hold_time": hold_time,
                         "item_id": item_id,
                         "hold_inform": hold_inform,
@@ -265,7 +266,17 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
                     }
                 )
 
-    df = pd.DataFrame(rows)[
+    df = pd.DataFrame(rows)
+    # rw_cnt the way the real pipeline derives it: within one lot_id, rank
+    # the distinct hold_time values, so every row of the same hold event
+    # shares a number and a re-hold after rework gets the next one. It is a
+    # property of the hold event, not of an individual wafer measurement --
+    # the dashboard groups the list on (lot_id, rw_cnt) and would split one
+    # event into several rows otherwise.
+    df["rw_cnt"] = (
+        df.groupby("lot_id", observed=True)["hold_time"].rank(method="dense").astype(int) - 1
+    )
+    df = df[
         [
             "lot_id",
             "root_lot_id",
@@ -424,7 +435,14 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
     owner_blank = dc_df["owner"].isna() | (dc_df["owner"].astype(str).str.strip() == "")
     undispositioned = code_blank & owner_blank
     if "status" in dc_df.columns:
-        undispositioned &= dc_df["status"].astype(str).str.strip().eq("Hold")
+        status_txt = dc_df["status"].astype(str).str.strip()
+        # blank/NaN status means "the status table has nothing on this lot",
+        # not "it was flowed" -- a brand new hold can easily land in dc
+        # before it shows up there. Only an explicit non-Hold status moves a
+        # row out, so an untriaged hold is never silently dropped from the
+        # default view.
+        status_unknown = dc_df["status"].isna() | status_txt.isin(["", "nan", "None", "NaT"])
+        undispositioned &= status_unknown | status_txt.eq("Hold")
     return dc_df[undispositioned] if view == "hold" else dc_df[~undispositioned]
 
 
@@ -464,8 +482,11 @@ def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     for key, grp in dc_df.groupby(keys, dropna=False, sort=False):
-        lot_id = key[0] if isinstance(key, tuple) else key
-        rw_cnt = key[1] if isinstance(key, tuple) else ""
+        # pandas hands back a 1-tuple when grouping on a one-element list
+        # (and a bare scalar on older versions), so normalize before indexing
+        key = key if isinstance(key, tuple) else (key,)
+        lot_id = key[0]
+        rw_cnt = key[1] if len(key) > 1 else ""
         rows.append({
             "rw_cnt": rw_cnt,
             "hold_time": grp["hold_time"].max(),
@@ -1037,8 +1058,10 @@ def show_dc_ocap():
             else:
                 # every rw_cnt of the lot, not just the one the clicked row
                 # stands for -- seeing the original next to its rework is the
-                # point of the breakdown
-                detail = dc_df[dc_df["lot_id"] == sel_lot_id].copy()
+                # point of the breakdown. Read from the unfiltered frame, or
+                # the hold view would hide the already-dispositioned pass and
+                # leave only the row that was clicked.
+                detail = full_dc_df[full_dc_df["lot_id"] == sel_lot_id].copy()
                 # astype(object) first: mapping a category column twice makes
                 # pandas try to rebuild it as a category, and since this map's
                 # result is tuples, pandas mistakes them for a MultiIndex and

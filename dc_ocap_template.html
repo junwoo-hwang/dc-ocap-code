@@ -290,12 +290,13 @@ function formatDisposition(rows) {
   };
 }
 
-// How many rows the list shows under the "hold" filter: one per lot_id,
-// since that is what the list groups on. Runs the list's own filter
-// rather than re-deriving "untriaged" here, so the header count can
-// never drift from the rows underneath it.
+// How many rows the list shows under the "hold" filter. Runs the list's
+// own filter AND grouping rather than re-deriving anything here, so the
+// header count can never drift from the rows underneath it -- counting
+// distinct lot_ids would undercount now that one lot can produce several
+// rows (one per rw_cnt).
 function countNewHolds(dcRows) {
-  return new Set(filterByStatus(dcRows, "hold").map(r => String(r.lot_id))).size;
+  return groupHolds(filterByStatus(dcRows, "hold")).length;
 }
 
 // "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 'Hold' 인 것.
@@ -306,9 +307,13 @@ function countNewHolds(dcRows) {
 function filterByStatus(dcRows, view) {
   if (view === "전체") return dcRows;
   const blank = (v) => v === null || v === undefined || String(v).trim() === "";
+  // blank/null status means "the status table has nothing on this lot",
+  // not "it was flowed" -- only an explicit non-Hold status moves a row
+  // out, so an untriaged hold is never silently dropped from the default
+  // view just because status hasn't landed yet.
   const undisp = dcRows.filter(r =>
     blank(r.code) && blank(r.owner) &&
-    (r.status === undefined || String(r.status).trim() === "Hold")
+    (blank(r.status) || String(r.status).trim() === "Hold")
   );
   if (view === "hold") return undisp;
   const undispSet = new Set(undisp);
@@ -538,14 +543,20 @@ function applySearchAndSort(grouped) {
   if (state.sortCol) {
     const col = state.sortCol;
     const dir = state.sortDir === "asc" ? 1 : -1;
+    const isBlank = v => v === null || v === undefined || String(v).trim() === "";
+    // decide numeric-vs-text once for the whole column, not per comparison:
+    // mixing the two inside the comparator makes it non-transitive (with
+    // "10", "9", "3,5" you get 10 > 9 > "3,5" > 10) and the sort result
+    // becomes implementation-defined. wafer_id holds "3,5" style lists, so
+    // that column has to compare as text throughout.
+    const numericCol = rows.every(r => isBlank(r[col]) || Number.isFinite(Number(r[col])));
     rows = rows.slice().sort((a, b) => {
       const av = a[col], bv = b[col];
-      // rw_cnt is a number: comparing as text would order 10 before 2
-      const an = Number(av), bn = Number(bv);
       let cmp;
-      if (av !== null && av !== "" && bv !== null && bv !== ""
-          && Number.isFinite(an) && Number.isFinite(bn)) {
-        cmp = an - bn;
+      if (numericCol) {
+        // blanks last regardless of direction
+        if (isBlank(av) || isBlank(bv)) cmp = isBlank(av) && isBlank(bv) ? 0 : (isBlank(av) ? 1 : -1) * dir;
+        else cmp = Number(av) - Number(bv);
       } else {
         cmp = String(av ?? "").localeCompare(String(bv ?? ""));
       }
@@ -576,7 +587,7 @@ function renderList(grouped) {
   });
 }
 
-function renderDetail(dcFiltered) {
+function renderDetail(dcAll) {
   detailPanel.innerHTML = "";
   const lotId = state.selectedLotId;
   if (lotId === null) {
@@ -584,8 +595,10 @@ function renderDetail(dcFiltered) {
     return;
   }
   // every rw_cnt of the lot, not just the one the clicked row stands for --
-  // seeing the original next to its rework is the point of the breakdown
-  const rows = dcFiltered.filter(r => r.lot_id === lotId).slice();
+  // seeing the original next to its rework is the point of the breakdown.
+  // Read from the unfiltered rows, or the hold view would hide the
+  // already-dispositioned pass and leave only the row that was clicked.
+  const rows = dcAll.filter(r => r.lot_id === lotId).slice();
   // rework on top, then wafers ascending, items grouped per wafer
   rows.sort((a, b) => {
     const rw = Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0);
@@ -792,7 +805,7 @@ function renderAll() {
   const dcFiltered = filterByStatus(dcAll, state.statusFilter);
   const grouped = groupHolds(dcFiltered);
   renderList(grouped);
-  renderDetail(dcFiltered);
+  renderDetail(dcAll);
   renderTrendAndComment(dcAll, dcFiltered);
 }
 
