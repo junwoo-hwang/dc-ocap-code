@@ -270,15 +270,39 @@ def check_status_filter(product_dc):
             print(f"\n  [{name}] dc 가 비어 있음")
             continue
         print(f"\n  [{name}]  전체 {len(df):,} 행")
+        # 각 탭이 '언제부터 언제까지' 를 담고 있는지 같이 찍는다. "이력에
+        # 과거 게 안 보인다" 같은 신고가 들어왔을 때, 필터가 걸러낸 건지
+        # 애초에 dc 에 안 들어온 건지를 이 한 줄로 가른다.
         for view in ("전체", "hold", "이력"):
             try:
                 sub = app.filter_by_status(df, view)
                 lots = app.group_holds(sub)
                 mark = "   << 0건" if len(lots) == 0 else ""
-                print(f"     {view:4s}: {len(sub):>7,} 행 -> 리스트 {len(lots):>4,} 줄{mark}")
+                span = ""
+                if "hold_time" in sub.columns and len(sub) and sub["hold_time"].notna().any():
+                    lo, hi = sub["hold_time"].min(), sub["hold_time"].max()
+                    span = f"  기간 {str(lo)[:10]} ~ {str(hi)[:10]}"
+                print(f"     {view:4s}: {len(sub):>7,} 행 -> 리스트 {len(lots):>4,} 줄{span}{mark}")
             except Exception as e:
                 print(f"     {view:4s}: !! {type(e).__name__}: {e}")
                 report_exc(f"[{name}] '{view}' 필터", e, header=False)
+
+        # '전체' 가 담고 있는 기간 자체가 짧으면 필터 문제가 아니라
+        # pull_data() 가 과거를 안 가져온 것이다. status 컬럼을 붙일 때
+        # inner join 을 쓰면 status 테이블에 없는 과거 lot 이 통째로
+        # 빠지면서 딱 이 모양이 된다.
+        if "hold_time" in df.columns and df["hold_time"].notna().any():
+            lo, hi = df["hold_time"].min(), df["hold_time"].max()
+            try:
+                days = (hi - lo).days
+            except Exception:
+                days = None
+            if days is not None and days <= 7:
+                note(2, f"[{name}] dc 가 담고 있는 기간이 {days}일뿐입니다",
+                     f"{str(lo)[:16]} ~ {str(hi)[:16]}",
+                     "'이력' 에 과거가 안 보인다면 필터가 아니라 pull_data() 문제입니다.",
+                     "status 컬럼을 merge(how='inner') 로 붙이면 status 테이블에 없는",
+                     "과거 lot 이 통째로 빠집니다. how='left' 로 바꾸세요.")
 
         cb, ob = blank_mask(df, "code"), blank_mask(df, "owner")
         if cb is not None and ob is not None:
