@@ -5,10 +5,12 @@ app.py 와 같은 폴더에 두고 실행:
     python diagnose.py
 
 pull_data() 가 돌려준 데이터를 대시보드가 쓰는 순서 그대로 따라가면서,
-어느 단계에서 건수가 0 이 되는지 보여줍니다. 화면에 아무것도 안 뜰 때
-제일 먼저 돌려볼 것.
+어느 단계에서 건수가 0 이 되는지 / 어디서 예외가 나는지 보여줍니다.
+화면에 아무것도 안 뜨거나 이상하게 뜰 때 제일 먼저 돌려볼 것.
+
+한 단계가 예외로 죽어도 나머지는 계속 돌아갑니다. 맨 끝 '요약' 에
+발견된 문제가 심각한 순서대로 다시 모여서 나옵니다.
 """
-import sys
 import traceback
 
 import pandas as pd
@@ -16,10 +18,60 @@ import pandas as pd
 import app
 
 
+# 발견된 문제를 모아뒀다가 맨 끝 요약에서 한 번에 보여준다.
+# (level: 1=치명적, 2=화면이 비어보임, 3=참고)
+FINDINGS = []
+
+# 같은 예외가 제품 3개 x 상태 3개로 아홉 번씩 터지면 traceback 이 화면을
+# 도배해서 정작 진단 결과가 안 보인다. 처음 한 번만 전문을 찍고 그 다음
+# 부터는 몇 번째인지만 알린다.
+_SEEN_EXC = {}
+
+
+def note(level, title, *lines):
+    FINDINGS.append((level, title, [str(x) for x in lines]))
+
+
+def report_exc(step_name, e, header=True):
+    """예외를 한 번만 자세히, 나머지는 짧게 보고한다.
+
+    traceback 도 print 로 내보낸다. stderr 로 보내면 파이프로 넘길 때
+    나머지 출력과 순서가 섞여서 어느 단계에서 난 에러인지 알 수 없다.
+    header=False 는 호출한 쪽이 이미 한 줄 찍은 경우(같은 내용을 두 번
+    보여주지 않기 위해).
+    """
+    sig = (type(e).__name__, str(e))
+    _SEEN_EXC[sig] = _SEEN_EXC.get(sig, 0) + 1
+    n = _SEEN_EXC[sig]
+    if n > 1:
+        print(f"        (같은 에러 {n}번째, traceback 생략)")
+        return
+    if header:
+        print(f"  !! {step_name}: 예외 발생 -> {type(e).__name__}: {e}")
+    for line in traceback.format_exc().rstrip().splitlines():
+        print("        " + line)
+    note(1, f"{step_name} 실행 중 예외",
+         f"{type(e).__name__}: {e}",
+         "위 traceback 의 마지막 줄이 실제 원인입니다.")
+
+
 def head(title):
     print("\n" + "=" * 68)
     print(title)
     print("=" * 68)
+
+
+def safe(step_name, fn, *args, **kwargs):
+    """한 단계를 실행하되, 예외가 나면 traceback 을 찍고 계속 진행한다.
+
+    진단 도중 죽어버리면 정작 원인이 있는 뒤쪽 단계를 못 보게 되므로,
+    예외 자체도 '발견된 문제' 로 기록해두고 넘어간다.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        report_exc(step_name, e)
+        return None
 
 
 def blank_mask(df, col):
@@ -29,34 +81,31 @@ def blank_mask(df, col):
     return df[col].isna() | (df[col].astype(str).str.strip() == "")
 
 
-def main():
-    head("1. pull_data() 가 무엇을 돌려줬나")
-    try:
-        frames = app.pull_data()
-    except Exception:
-        print("!! pull_data() 자체가 실패했습니다:")
-        traceback.print_exc()
-        return
+def sample_lots(df, mask, n=3):
+    """문제가 있는 행에서 lot_id 예시를 뽑는다 (사내 조회용)."""
+    if "lot_id" not in df.columns:
+        return []
+    return list(dict.fromkeys(df.loc[mask, "lot_id"].astype(str)))[:n]
 
-    if not isinstance(frames, (tuple, list)) or len(frames) != 6:
-        print(f"!! 6개를 return 해야 하는데 {type(frames).__name__} "
-              f"({len(frames) if hasattr(frames, '__len__') else '?'}개) 를 돌려줬습니다.")
-        print("   순서: dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend")
-        return
 
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
-    product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
-    product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-
-    for name, df in list(product_dc.items()):
+# ====================================================================
+# 1~3. 형태 / 컬럼 / check_data
+# ====================================================================
+def check_shapes(product_dc, product_trend):
+    for name, df in product_dc.items():
         if not isinstance(df, pd.DataFrame):
             print(f"  dc_{name.lower():4s}: !! DataFrame 이 아님 ({type(df).__name__})")
+            note(1, f"dc_{name.lower()} 가 DataFrame 이 아님",
+                 f"실제 타입: {type(df).__name__}",
+                 "pull_data() 가 DataFrame 을 돌려주도록 고쳐야 합니다.")
         else:
             print(f"  dc_{name.lower():4s}: {len(df):>7,} 행 x {len(df.columns)} 컬럼"
                   + ("   << 비어 있음!" if df.empty else ""))
-    for name, df in list(product_trend.items()):
+    for name, df in product_trend.items():
         if not isinstance(df, pd.DataFrame):
             print(f"  {name.lower()}_trend: !! DataFrame 이 아님 ({type(df).__name__})")
+            note(1, f"{name.lower()}_trend 가 DataFrame 이 아님",
+                 f"실제 타입: {type(df).__name__}")
         else:
             print(f"  {name.lower()}_trend: {len(df):>7,} 행 x {len(df.columns)} 컬럼"
                   + ("   << 비어 있음!" if df.empty else ""))
@@ -64,8 +113,11 @@ def main():
     if all(isinstance(d, pd.DataFrame) and d.empty for d in product_dc.values()):
         print("\n>> dc 3개가 모두 비어 있습니다. 대시보드에 아무것도 안 뜨는 것이 당연합니다.")
         print("   pull_data() 안의 조회 조건(기간/제품/라인 등)을 확인하세요.")
+        note(1, "dc 3개가 전부 비어 있음",
+             "pull_data() 안의 조회 조건(기간/제품/라인)을 확인하세요.")
 
-    head("2. 컬럼 이름 확인 (대시보드가 요구하는 것 대비)")
+
+def check_columns(product_dc, product_trend):
     for name, df in product_dc.items():
         if not isinstance(df, pd.DataFrame):
             continue
@@ -73,6 +125,9 @@ def main():
         print(f"  dc_{name.lower()}: " + ("전부 있음" if not missing else f"!! 없음 -> {missing}"))
         if missing:
             print(f"     실제 컬럼: {list(df.columns)}")
+            note(1, f"dc_{name.lower()} 에 필수 컬럼이 없음",
+                 f"없는 컬럼: {missing}",
+                 "이 상태면 대시보드가 아예 에러 화면을 띄우고 멈춥니다.")
     for name, df in product_trend.items():
         if not isinstance(df, pd.DataFrame):
             continue
@@ -80,37 +135,150 @@ def main():
         print(f"  {name.lower()}_trend: " + ("전부 있음" if not missing else f"!! 없음 -> {missing}"))
         if missing:
             print(f"     실제 컬럼: {list(df.columns)[:15]}{' ...' if len(df.columns) > 15 else ''}")
+            note(1, f"{name.lower()}_trend 에 필수 컬럼이 없음", f"없는 컬럼: {missing}")
 
-    head("3. check_data() 결과 (이게 걸리면 화면에 에러가 떴어야 함)")
-    try:
-        problems = app.check_data(product_dc, product_trend)
-    except Exception:
-        print("!! check_data() 가 예외로 죽었습니다:")
-        traceback.print_exc()
-        problems = None
+    # status 는 DC_REQUIRED 에 없다 (없어도 돌아가도록 되어 있음).
+    # 다만 없으면 hold 필터가 예전처럼 owner/code 만 보고 판단한다.
+    for name, df in product_dc.items():
+        if isinstance(df, pd.DataFrame) and "status" not in df.columns:
+            print(f"  dc_{name.lower()}: (참고) status 컬럼이 없습니다 "
+                  "-> hold 판정에 status 조건이 빠집니다")
+            note(3, f"dc_{name.lower()} 에 status 컬럼이 없음",
+                 "owner/comment 가 다음날 아침에 적재되는 문제를 status 로 막고 있는데,",
+                 "이 제품은 그 조건이 빠진 채로 동작합니다.")
+
+
+def check_check_data(product_dc, product_trend):
+    problems = safe("check_data()", app.check_data, product_dc, product_trend)
     if problems is None:
-        pass
-    elif problems:
+        return
+    if problems:
         for p in problems:
             print("  - " + p)
+        note(1, "check_data() 가 문제를 보고했습니다",
+             *problems,
+             "이 상태면 대시보드가 에러 화면을 띄우고 멈춥니다.")
     else:
         print("  문제 없음")
 
-    head("4. 상태 필터별 건수  << 화면이 비어 보이는 가장 흔한 원인")
+
+# ====================================================================
+# 4. 핵심 컬럼 값 품질 (hold_time / rw_cnt / status)
+# ====================================================================
+def check_key_columns(product_dc):
+    """리스트가 '있긴 한데 이상하게' 나오는 원인을 잡는 단계.
+
+    hold_time / rw_cnt / status 세 개는 리스트를 어떻게 쪼개고 무엇을
+    hold 로 볼지를 결정한다. 컬럼이 있어도 값이 틀어져 있으면 화면은
+    에러 없이 '조용히' 틀리게 나오므로 여기서 따로 본다.
+    """
+    for name, df in product_dc.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            print(f"\n  [{name}] dc 가 비어 있음")
+            continue
+        print(f"\n  [{name}]")
+
+        # ---- hold_time ---------------------------------------------
+        if "hold_time" in df.columns:
+            dtype = df["hold_time"].dtype
+            is_dt = pd.api.types.is_datetime64_any_dtype(df["hold_time"])
+            nat = int(df["hold_time"].isna().sum())
+            print(f"     hold_time  dtype={dtype}  결측={nat:,}/{len(df):,}"
+                  + ("" if is_dt else "   << 날짜형이 아닙니다"))
+            if not is_dt:
+                note(2, f"[{name}] hold_time 이 날짜형이 아님",
+                     f"현재 dtype={dtype}",
+                     "문자열이면 정렬이 사전순이 되어 최신순 정렬이 틀어지고,",
+                     "rw_cnt 를 hold_time 순위로 매기는 계산도 같이 틀어집니다.",
+                     "pull_data() 에서 pd.to_datetime() 으로 변환해 주세요.")
+            if nat:
+                note(2, f"[{name}] hold_time 이 비어있는 행 {nat:,}건",
+                     f"예시 lot_id: {sample_lots(df, df['hold_time'].isna())}",
+                     "hold_time 이 비면 rw_cnt 순위 계산이 NaN 이 됩니다.")
+
+        # ---- rw_cnt -------------------------------------------------
+        if "rw_cnt" in df.columns:
+            na = int(df["rw_cnt"].isna().sum())
+            print(f"     rw_cnt     dtype={df['rw_cnt'].dtype}  결측={na:,}/{len(df):,}"
+                  f"  값 종류={sorted(set(df['rw_cnt'].dropna().map(app.norm_rw_cnt)))[:8]}")
+            if na:
+                note(2, f"[{name}] rw_cnt 가 비어있는 행 {na:,}건",
+                     f"예시 lot_id: {sample_lots(df, df['rw_cnt'].isna())}",
+                     "화면은 안 깨지지만(빈 값도 한 묶음으로 처리), rw_cnt 가 비었다는 건",
+                     "보통 hold_time 이 비어서 순위 계산이 실패했다는 신호입니다.")
+
+            if "lot_id" in df.columns and "hold_time" in df.columns:
+                # rw_cnt 는 'hold 이벤트' 단위여야 한다. wafer 측정 단위로
+                # 들어오면 같은 hold 가 여러 줄로 쪼개져 신규 건수가 부풀고,
+                # 반대로 재작업인데 같은 번호면 원본과 한 줄로 합쳐진다.
+                g = df.groupby(["lot_id", "hold_time"], dropna=False, observed=True)["rw_cnt"]
+                split = g.nunique(dropna=False)
+                split = split[split > 1]
+                if len(split):
+                    print(f"     !! 같은 (lot_id, hold_time) 인데 rw_cnt 가 여러 개: {len(split)}건")
+                    print(f"        예: {[f'{a} / {b}' for a, b in list(split.index)[:3]]}")
+                    note(1, f"[{name}] 한 hold 이벤트가 여러 줄로 쪼개집니다",
+                         f"같은 (lot_id, hold_time) 인데 rw_cnt 가 다른 경우: {len(split)}건",
+                         f"예: {[f'{a} / {b}' for a, b in list(split.index)[:3]]}",
+                         "rw_cnt 는 wafer 측정 단위가 아니라 hold 이벤트 단위여야 합니다.",
+                         "lot_id 안에서 hold_time 을 dense rank 한 값인지 확인하세요.",
+                         "이 상태면 '신규 hold 건수' 가 실제보다 부풀어 보입니다.")
+
+                g2 = df.groupby(["lot_id", "rw_cnt"], dropna=False, observed=True)["hold_time"]
+                merged = g2.nunique(dropna=False)
+                merged = merged[merged > 1]
+                if len(merged):
+                    print(f"     !! 같은 (lot_id, rw_cnt) 인데 hold_time 이 여러 개: {len(merged)}건")
+                    print(f"        예: {[f'{a} / rw_cnt={b}' for a, b in list(merged.index)[:3]]}")
+                    note(1, f"[{name}] 재작업 건이 원본과 한 줄로 합쳐집니다",
+                         f"같은 (lot_id, rw_cnt) 인데 hold_time 이 다른 경우: {len(merged)}건",
+                         f"예: {[f'{a} / rw_cnt={b}' for a, b in list(merged.index)[:3]]}",
+                         "재측정 후 다시 hold 가 걸렸으면 rw_cnt 가 올라가야 하는데",
+                         "그대로라서 리스트에서 원본과 한 줄로 묶입니다.")
+
+        # ---- status -------------------------------------------------
+        if "status" in df.columns:
+            txt = df["status"].astype(str).str.strip()
+            blank = df["status"].isna() | txt.isin(["", "nan", "None", "NaT"])
+            counts = txt[~blank].value_counts()
+            print(f"     status     결측={int(blank.sum()):,}/{len(df):,}  "
+                  f"값: {dict(list(counts.items())[:6])}")
+
+            # hold 판정은 'Hold' (H 만 대문자) 를 정확히 본다.
+            wrong_case = [v for v in counts.index
+                          if v.lower() == "hold" and v != "Hold"]
+            if wrong_case:
+                n = int(counts[wrong_case].sum())
+                print(f"     !! 'Hold' 와 대소문자가 다른 값: {wrong_case} ({n:,}행)")
+                note(1, f"[{name}] status 대소문자가 달라 hold 가 전부 이력으로 빠집니다",
+                     f"발견된 표기: {wrong_case} ({n:,}행)",
+                     "hold 판정은 정확히 'Hold' (H 만 대문자) 만 인정합니다.",
+                     "원본 테이블 표기를 확인하거나 pull_data() 에서 맞춰주세요.")
+            if not len(counts):
+                note(2, f"[{name}] status 값이 전부 비어 있음",
+                     "빈 값은 hold 로 남겨두므로 화면은 예전처럼 동작합니다.",
+                     "status 테이블 조인이 실패한 건 아닌지 확인하세요.")
+
+
+# ====================================================================
+# 5. 상태 필터별 건수
+# ====================================================================
+def check_status_filter(product_dc):
     print("   (대시보드 기본값은 'hold' 입니다. hold 가 0 이면 첫 화면이 빈 채로 보입니다)")
     for name, df in product_dc.items():
         if not isinstance(df, pd.DataFrame) or df.empty:
             print(f"\n  [{name}] dc 가 비어 있음")
             continue
         print(f"\n  [{name}]  전체 {len(df):,} 행")
-        for status in ("전체", "hold", "이력"):
+        for view in ("전체", "hold", "이력"):
             try:
-                sub = app.filter_by_status(df, status)
+                sub = app.filter_by_status(df, view)
                 lots = app.group_holds(sub)
                 mark = "   << 0건" if len(lots) == 0 else ""
-                print(f"     {status:4s}: {len(sub):>7,} 행 -> 리스트 {len(lots):>4,} 줄{mark}")
+                print(f"     {view:4s}: {len(sub):>7,} 행 -> 리스트 {len(lots):>4,} 줄{mark}")
             except Exception as e:
-                print(f"     {status:4s}: !! {type(e).__name__}: {e}")
+                print(f"     {view:4s}: !! {type(e).__name__}: {e}")
+                report_exc(f"[{name}] '{view}' 필터", e, header=False)
 
         cb, ob = blank_mask(df, "code"), blank_mask(df, "owner")
         if cb is not None and ob is not None:
@@ -119,11 +287,16 @@ def main():
             if int((cb & ob).sum()) == 0:
                 print("     >> code/owner 가 둘 다 빈 행이 하나도 없습니다.")
                 print("        = 'hold' 필터는 항상 0건입니다. 화면에서 '전체' 를 눌러보세요.")
+                note(2, f"[{name}] code/owner 가 둘 다 빈 행이 없음",
+                     "'hold' 필터가 항상 0건이 되어 첫 화면이 비어 보입니다.")
 
-    head("5. dc 와 trend 가 서로 연결되는가 (차트가 비는 원인)")
-    broken = {"item": [], "pair": []}
-    for name in ("ULY", "SOL", "TTS"):
-        dc_df, tr_df = product_dc[name], product_trend[name]
+
+# ====================================================================
+# 6. dc <-> trend 연결
+# ====================================================================
+def check_join(product_dc, product_trend):
+    for name in product_dc:
+        dc_df, tr_df = product_dc[name], product_trend.get(name)
         if not isinstance(dc_df, pd.DataFrame) or not isinstance(tr_df, pd.DataFrame):
             continue
         if dc_df.empty or tr_df.empty:
@@ -137,9 +310,12 @@ def main():
             print(f"     item_id 종류 {len(ids)}개 중 trend 컬럼과 매칭 안 되는 것: "
                   f"{len(unresolved)}개")
             if unresolved:
-                broken["item"].append(name)
                 print(f"       예: {unresolved[:5]}")
-                print(f"       trend 쪽 컬럼 예: {[c for c in tr_df.columns][:10]}")
+                print(f"       trend 쪽 컬럼 예: {list(tr_df.columns)[:10]}")
+                note(2, f"[{name}] item_id 가 trend 컬럼명과 매칭되지 않음",
+                     f"매칭 안 되는 item: {unresolved[:5]}",
+                     f"trend 쪽 컬럼 예: {list(tr_df.columns)[:10]}",
+                     "해당 item 을 고르면 차트 자리에 경고만 뜹니다.")
 
         pair_cols = {"root_lot_id", "wafer_id"}
         if pair_cols <= set(dc_df.columns) and pair_cols <= set(tr_df.columns):
@@ -151,16 +327,85 @@ def main():
             print(f"     (root_lot_id, wafer_id) {len(dc_pairs)}쌍 중 "
                   f"trend 에 없는 것: {len(miss)}쌍")
             if miss:
-                broken["pair"].append((name, len(miss), len(dc_pairs)))
                 print(f"       예(dc): {sorted(map(str, miss))[:3]}")
                 print(f"       예(trend): {sorted(map(str, tr_pairs))[:3]}")
+                note(2, f"[{name}] dc 의 wafer 가 trend 에 없습니다",
+                     f"{len(miss)}/{len(dc_pairs)} 쌍이 매칭 실패",
+                     f"예(dc): {sorted(map(str, miss))[:3]}",
+                     f"예(trend): {sorted(map(str, tr_pairs))[:3]}",
+                     "차트에 빨간/파란 점(=hold 걸린 wafer)이 안 찍힙니다.",
+                     "양쪽 lot_id 표기(접두어/자리수)나 wafer_id 형식을 맞춰야 합니다.")
             print(f"     dtype  dc.wafer_id={dc_df['wafer_id'].dtype} "
                   f"trend.wafer_id={tr_df['wafer_id'].dtype}")
 
-    head("6. 요약")
-    total_lots = 0
-    hold_lots = 0
+
+# ====================================================================
+# 7. 리스트 -> 우측 패널 시뮬레이션
+# ====================================================================
+def check_row_click(product_dc, product_trend):
+    """리스트의 각 줄을 실제로 눌러본 것처럼 우측 패널을 계산해 본다.
+
+    리스트에는 멀쩡히 떠 있는데 클릭하면 차트/코멘트가 통째로 비는
+    경우가 있다. 리스트는 (lot_id, rw_cnt) 로 묶고 우측은 그 두 개로
+    되짚어 찾는 구조라, 그 되짚기가 실패하면 화면에는 아무 에러도 안
+    뜨고 그냥 빈 칸이 된다. 여기서 미리 잡는다.
+    """
     for name, df in product_dc.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        tr_df = product_trend.get(name)
+        print(f"\n  [{name}]")
+
+        for view in ("hold", "전체"):
+            dc_df = safe(f"[{name}] filter_by_status('{view}')",
+                         app.filter_by_status, df, view)
+            if dc_df is None:
+                continue
+            grouped = safe(f"[{name}] group_holds('{view}')", app.group_holds, dc_df)
+            if grouped is None or grouped.empty:
+                print(f"     {view:4s}: 리스트가 비어 있어 확인 생략")
+                continue
+
+            empty_rows, no_chart = [], []
+            for _, row in grouped.iterrows():
+                lot_id, rw_cnt = row["lot_id"], row.get("rw_cnt", "")
+                lot_rows = dc_df[
+                    (dc_df["lot_id"] == lot_id)
+                    & dc_df["rw_cnt"].map(app.norm_rw_cnt).eq(app.norm_rw_cnt(rw_cnt))
+                ] if "rw_cnt" in dc_df.columns else dc_df[dc_df["lot_id"] == lot_id]
+
+                items = list(dict.fromkeys(lot_rows["item_id"])) if len(lot_rows) else []
+                if not items:
+                    empty_rows.append(f"{lot_id} (rw_cnt={rw_cnt!r})")
+                    continue
+                if isinstance(tr_df, pd.DataFrame) and not tr_df.empty:
+                    if app.resolve_item_col(tr_df, items[0]) is None:
+                        no_chart.append(f"{lot_id} (rw_cnt={rw_cnt}, item={items[0]})")
+
+            ok = len(grouped) - len(empty_rows)
+            print(f"     {view:4s}: {len(grouped)}줄 중 {ok}줄 정상"
+                  + (f", {len(empty_rows)}줄 우측 공백" if empty_rows else "")
+                  + (f", {len(no_chart)}줄 차트 없음" if no_chart else ""))
+
+            if empty_rows:
+                print(f"        우측 공백 예: {empty_rows[:3]}")
+                note(1, f"[{name}/{view}] 리스트에는 뜨는데 클릭하면 우측이 빕니다",
+                     f"{len(empty_rows)}/{len(grouped)} 줄",
+                     f"예: {empty_rows[:3]}",
+                     "리스트 줄을 자기 원본 행으로 되짚지 못한 경우입니다.",
+                     "위 4번의 rw_cnt / hold_time 항목을 먼저 확인하세요.")
+            if no_chart:
+                print(f"        차트 없음 예: {no_chart[:3]}")
+                note(3, f"[{name}/{view}] 첫 item 의 trend 컬럼을 못 찾습니다",
+                     f"{len(no_chart)}줄", f"예: {no_chart[:3]}")
+
+
+# ====================================================================
+# 8. 요약
+# ====================================================================
+def summary(product_dc):
+    total_lots = hold_lots = 0
+    for df in product_dc.values():
         if isinstance(df, pd.DataFrame) and not df.empty:
             try:
                 total_lots += len(app.group_holds(app.filter_by_status(df, "전체")))
@@ -172,7 +417,6 @@ def main():
     print()
     if not total_lots:
         print("  >> 어느 상태로도 표시할 행이 없습니다. 리스트가 통째로 빕니다.")
-        print("     위 1~3번(pull_data 결과 / 컬럼 이름 / check_data)을 확인하세요.")
     elif not hold_lots:
         print("  >> 리스트에 표시할 데이터는 있는데 hold 가 0건입니다.")
         print("     대시보드 기본 필터가 'hold' 라서 첫 화면만 비어 보이는 것입니다.")
@@ -180,18 +424,62 @@ def main():
     else:
         print("  >> 리스트 자체는 정상입니다 (첫 화면에 hold 건이 보여야 정상).")
 
-    if broken["pair"]:
-        print()
-        print("  >> 리스트에서 행을 골라도 차트에 빨간/파란 점이 안 찍힙니다:")
-        for name, miss, tot in broken["pair"]:
-            print(f"     [{name}] dc 의 (root_lot_id, wafer_id) {miss}/{tot} 쌍이"
-                  f" trend 에 없습니다.")
-        print("     양쪽 lot_id 표기(접두어/자리수)나 wafer_id 형식을 맞춰야 합니다.")
-        print("     바로 위 5번에 양쪽 실제 값 예시가 찍혀 있으니 비교해보세요.")
-    if broken["item"]:
-        print()
-        print(f"  >> [{', '.join(broken['item'])}] item_id 가 trend 컬럼명과 매칭되지"
-              " 않습니다. 해당 item 은 차트가 안 뜹니다.")
+    if not FINDINGS:
+        print("\n  >> 발견된 문제 없음.")
+        return
+
+    label = {1: "[치명적]", 2: "[화면 이상]", 3: "[참고]"}
+    print(f"\n  발견된 문제 {len(FINDINGS)}건 (심각한 순):")
+    for level, title, lines in sorted(FINDINGS, key=lambda f: f[0]):
+        print(f"\n  {label[level]} {title}")
+        for line in lines:
+            print(f"      {line}")
+
+
+def main():
+    head("1. pull_data() 가 무엇을 돌려줬나")
+    try:
+        frames = app.pull_data()
+    except Exception:
+        print("!! pull_data() 자체가 실패했습니다:")
+        for line in traceback.format_exc().rstrip().splitlines():
+            print("   " + line)
+        print("\n>> 여기서 막히면 뒤 단계는 볼 것도 없습니다.")
+        print("   위 traceback 의 마지막 줄이 실제 원인입니다 "
+              "(조회 권한 / 쿼리 문법 / 접속 정보 등).")
+        return
+
+    if not isinstance(frames, (tuple, list)) or len(frames) != 6:
+        n = len(frames) if hasattr(frames, "__len__") else "?"
+        print(f"!! 6개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
+        print("   순서: dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend")
+        return
+
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
+    product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+    product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+    safe("1단계", check_shapes, product_dc, product_trend)
+
+    head("2. 컬럼 이름 확인 (대시보드가 요구하는 것 대비)")
+    safe("2단계", check_columns, product_dc, product_trend)
+
+    head("3. check_data() 결과 (이게 걸리면 화면에 에러가 떴어야 함)")
+    safe("3단계", check_check_data, product_dc, product_trend)
+
+    head("4. hold_time / rw_cnt / status 값 확인  << 조용히 틀리는 원인")
+    safe("4단계", check_key_columns, product_dc)
+
+    head("5. 상태 필터별 건수  << 화면이 비어 보이는 가장 흔한 원인")
+    safe("5단계", check_status_filter, product_dc)
+
+    head("6. dc 와 trend 가 서로 연결되는가 (차트가 비는 원인)")
+    safe("6단계", check_join, product_dc, product_trend)
+
+    head("7. 리스트 행을 클릭하면 우측이 뜨는가 (시뮬레이션)")
+    safe("7단계", check_row_click, product_dc, product_trend)
+
+    head("8. 요약")
+    safe("8단계", summary, product_dc)
 
 
 if __name__ == "__main__":
