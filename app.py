@@ -427,12 +427,17 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
 
     "조치가 안 됨" 은 두 가지를 모두 만족해야 합니다:
       1) code 와 owner 가 둘 다 비어있음 (아직 코멘트가 안 달림)
-      2) status 컬럼이 'Hold' 임 (설비상 아직 잡혀 있음)
+      2) status 가 정확히 'Hold' 임 (H 만 대문자, 설비상 아직 잡혀 있음)
 
     2번이 필요한 이유: dc 는 30분마다 갱신되는데 owner/comment 는 다음날
     아침에야 적재되기 때문에, 누군가 코멘트를 달고 flow 시켜도 하루 동안
     hold 에 남아 있게 됩니다. status 는 제때 갱신되므로 이미 flow 된 건
-    (Active / Run 등) 을 그 자리에서 이력으로 넘길 수 있습니다.
+    (Active / Run / ship 등) 을 그 자리에서 이력으로 넘길 수 있습니다.
+
+    'Hold' 가 아닌 것은 빈 값도 포함해서 전부 이력입니다. 즉 status 가
+    아직 안 붙은 신규 hold 는 기본 화면에 안 보입니다. status 결측이
+    쌓이면 hold 가 통째로 비어 보이므로, diagnose.py 4번이 결측 건수를
+    따로 세어 경고합니다.
 
     status 컬럼이 없는 dc 도 그대로 동작하도록, 없으면 1번만 봅니다.
     """
@@ -442,14 +447,8 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
     owner_blank = dc_df["owner"].isna() | (dc_df["owner"].astype(str).str.strip() == "")
     undispositioned = code_blank & owner_blank
     if "status" in dc_df.columns:
-        status_txt = dc_df["status"].astype(str).str.strip()
-        # blank/NaN status means "the status table has nothing on this lot",
-        # not "it was flowed" -- a brand new hold can easily land in dc
-        # before it shows up there. Only an explicit non-Hold status moves a
-        # row out, so an untriaged hold is never silently dropped from the
-        # default view.
-        status_unknown = dc_df["status"].isna() | status_txt.isin(["", "nan", "None", "NaT"])
-        undispositioned &= status_unknown | status_txt.eq("Hold")
+        # astype(str) 이 NaN 을 "nan" 으로 바꾸므로 결측도 자연히 탈락한다
+        undispositioned &= dc_df["status"].astype(str).str.strip().eq("Hold")
     return dc_df[undispositioned] if view == "hold" else dc_df[~undispositioned]
 
 

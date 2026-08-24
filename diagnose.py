@@ -254,9 +254,22 @@ def check_key_columns(product_dc):
                      f"발견된 표기: {wrong_case} ({n:,}행)",
                      "hold 판정은 정확히 'Hold' (H 만 대문자) 만 인정합니다.",
                      "원본 테이블 표기를 확인하거나 pull_data() 에서 맞춰주세요.")
+            # 'Hold' 가 아니면 빈 값도 전부 이력이다. 그래서 status 결측은
+            # 그 자체로 'hold 에서 사라진 건수' 다. code/owner 까지 비어
+            # 있는(= 원래 hold 로 보여야 할) 행만 세어야 과장이 안 된다.
+            cb, ob = blank_mask(df, "code"), blank_mask(df, "owner")
+            if cb is not None and ob is not None:
+                hidden = blank & cb & ob
+                if int(hidden.sum()):
+                    print(f"     !! status 가 비어서 hold 에서 빠지는 행: {int(hidden.sum()):,}")
+                    note(1, f"[{name}] status 미적재로 hold 에서 빠지는 행 {int(hidden.sum()):,}건",
+                         f"예시 lot_id: {sample_lots(df, hidden)}",
+                         "code/owner 가 둘 다 비었으니 원래는 hold 로 보여야 할 행인데,",
+                         "status 가 'Hold' 가 아니라(비어 있어서) 이력으로 넘어갑니다.",
+                         "status 조인이 신규 hold 를 못 따라오고 있는지 확인하세요.")
             if not len(counts):
-                note(2, f"[{name}] status 값이 전부 비어 있음",
-                     "빈 값은 hold 로 남겨두므로 화면은 예전처럼 동작합니다.",
+                note(1, f"[{name}] status 값이 전부 비어 있음",
+                     "'Hold' 가 아닌 것은 전부 이력이므로 hold 탭이 통째로 0건이 됩니다.",
                      "status 테이블 조인이 실패한 건 아닌지 확인하세요.")
 
 

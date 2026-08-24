@@ -315,21 +315,22 @@ function countNewHolds(dcRows) {
   return groupHolds(filterByStatus(dcRows, "hold")).length;
 }
 
-// "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 'Hold' 인 것.
+// "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 정확히 'Hold'.
 // dc 는 30분마다 갱신되지만 owner/comment 는 다음날 아침에야 적재되므로,
 // 코멘트를 달고 flow 시킨 건이 하루 동안 hold 에 남는 것을 막으려면
 // 제때 갱신되는 status 를 같이 봐야 합니다.
-// status 컬럼이 없는 dc 도 그대로 동작하도록, 없으면 code/owner 만 봅니다.
+// 'Hold' 가 아닌 것은 빈 값도 포함해서 전부 이력입니다 (app.py 와 동일).
 function filterByStatus(dcRows, view) {
   if (view === "전체") return dcRows;
   const blank = (v) => v === null || v === undefined || String(v).trim() === "";
-  // blank/null status means "the status table has nothing on this lot",
-  // not "it was flowed" -- only an explicit non-Hold status moves a row
-  // out, so an untriaged hold is never silently dropped from the default
-  // view just because status hasn't landed yet.
+  // dc 에 status 컬럼이 아예 없으면 예전처럼 code/owner 만 본다.
+  // app.py 의 `if "status" in dc_df.columns` 와 같은 뜻 -- 이걸 빼면
+  // status 없는 dc 에서 hold 가 통째로 0건이 되어 파이썬과 갈린다.
+  const hasStatus = dcRows.length > 0 &&
+    Object.prototype.hasOwnProperty.call(dcRows[0], "status");
   const undisp = dcRows.filter(r =>
     blank(r.code) && blank(r.owner) &&
-    (blank(r.status) || String(r.status).trim() === "Hold")
+    (!hasStatus || String(r.status ?? "").trim() === "Hold")
   );
   if (view === "hold") return undisp;
   const undispSet = new Set(undisp);
