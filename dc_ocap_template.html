@@ -237,6 +237,19 @@ function normWafer(v) {
   return /^-?\d+$/.test(s) ? parseInt(s, 10) : s;
 }
 
+// mirrors norm_rw_cnt() in app.py: the list groups on (lot_id, rw_cnt) and
+// everything on the right is looked up with that pair, so a missing rw_cnt
+// (null/NaN) and 0 vs 0.0 both have to land on one key -- otherwise the row
+// sits in the list with an empty chart beside it
+function normRwCnt(v) {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "number" && !Number.isFinite(v)) return "";
+  const s = String(v).trim();
+  if (s === "" || s === "NaN" || s === "None" || s === "null") return "";
+  const n = Number(s);
+  return Number.isFinite(n) ? String(Math.trunc(n)) : s;
+}
+
 function toFloat(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -329,7 +342,7 @@ function groupHolds(dcRows) {
   const order = [];
   const groups = new Map();
   for (const r of dcRows) {
-    const key = String(r.lot_id) + "||" + String(r.rw_cnt ?? "");
+    const key = String(r.lot_id) + "||" + normRwCnt(r.rw_cnt);
     if (!groups.has(key)) { groups.set(key, []); order.push(key); }
     groups.get(key).push(r);
   }
@@ -581,7 +594,7 @@ function renderList(grouped) {
   listBody.innerHTML = "";
   applySearchAndSort(grouped).forEach(row => {
     const tr = el("tr", { "data-lot-id": row.lot_id, "data-rw-cnt": row.rw_cnt });
-    if (row.lot_id === state.selectedLotId && String(row.rw_cnt) === String(state.selectedRwCnt)) {
+    if (row.lot_id === state.selectedLotId && normRwCnt(row.rw_cnt) === normRwCnt(state.selectedRwCnt)) {
       tr.classList.add("selected");
     }
     // same cellText() the search goes through, so the two can't drift apart
@@ -647,12 +660,12 @@ function ensureTrendSkeleton() {
   trendPanel.appendChild(el("div", { class: "caption", id: "chartCaption" }));
 
   prevBtn.addEventListener("click", () => {
-    const key = `${state.product}|${state.selectedLotId}|${state.selectedRwCnt}`;
+    const key = `${state.product}|${state.selectedLotId}|${normRwCnt(state.selectedRwCnt)}`;
     state.itemIdxByKey[key] = Math.max(0, (state.itemIdxByKey[key] ?? 0) - 1);
     renderAll();
   });
   nextBtn.addEventListener("click", () => {
-    const key = `${state.product}|${state.selectedLotId}|${state.selectedRwCnt}`;
+    const key = `${state.product}|${state.selectedLotId}|${normRwCnt(state.selectedRwCnt)}`;
     state.itemIdxByKey[key] = (state.itemIdxByKey[key] ?? 0) + 1;
     renderAll();
   });
@@ -682,7 +695,7 @@ function handleChartClick(clickedRoot, clickedWafer, itemId) {
   let clickLotId = null, clickRwCnt = null;
   if (clickRows.length) {
     const current = clickRows.find(
-      r => r.lot_id === state.selectedLotId && String(r.rw_cnt) === String(state.selectedRwCnt)
+      r => r.lot_id === state.selectedLotId && normRwCnt(r.rw_cnt) === normRwCnt(state.selectedRwCnt)
     );
     const pick = current || clickRows.slice().sort((a, b) => Number(b.rw_cnt || 0) - Number(a.rw_cnt || 0))[0];
     clickLotId = pick.lot_id;
@@ -691,21 +704,21 @@ function handleChartClick(clickedRoot, clickedWafer, itemId) {
 
   if (
     clickLotId !== null &&
-    (clickLotId !== state.selectedLotId || String(clickRwCnt) !== String(state.selectedRwCnt))
+    (clickLotId !== state.selectedLotId || normRwCnt(clickRwCnt) !== normRwCnt(state.selectedRwCnt))
   ) {
     // only adopt it as the checked list row if it's visible under the
     // current status filter -- otherwise there's no row to check, but the
     // ring/comment below still resolve against the full (unfiltered) set
     const filtered = filterByStatus(fullDc, state.statusFilter);
-    if (filtered.some(r => r.lot_id === clickLotId && String(r.rw_cnt) === String(clickRwCnt))) {
+    if (filtered.some(r => r.lot_id === clickLotId && normRwCnt(r.rw_cnt) === normRwCnt(clickRwCnt))) {
       // scoped to this event's rw_cnt, not the whole lot_id -- a rework
       // shares the lot_id with its original hold and must not mix items
       const newItems = uniqueOrdered(
         filtered
-          .filter(r => r.lot_id === clickLotId && String(r.rw_cnt) === String(clickRwCnt))
+          .filter(r => r.lot_id === clickLotId && normRwCnt(r.rw_cnt) === normRwCnt(clickRwCnt))
           .map(r => r.item_id)
       );
-      state.itemIdxByKey[`${state.product}|${clickLotId}|${clickRwCnt}`] =
+      state.itemIdxByKey[`${state.product}|${clickLotId}|${normRwCnt(clickRwCnt)}`] =
         newItems.includes(itemId) ? newItems.indexOf(itemId) : 0;
       state.selectedLotId = clickLotId;
       state.selectedRwCnt = clickRwCnt;
@@ -731,9 +744,9 @@ function renderTrendAndComment(dcAll, dcFiltered) {
   // scoped to the clicked event's rw_cnt too, not just its lot_id -- a
   // rework shares the lot_id with its original hold, and without this the
   // item list, control limits and paging state below would mix both events
-  const lotRows = dcFiltered.filter(r => r.lot_id === lotId && String(r.rw_cnt) === String(rwCnt));
+  const lotRows = dcFiltered.filter(r => r.lot_id === lotId && normRwCnt(r.rw_cnt) === normRwCnt(rwCnt));
   const items = uniqueOrdered(lotRows.map(r => r.item_id));
-  const key = `${state.product}|${lotId}|${rwCnt}`;
+  const key = `${state.product}|${lotId}|${normRwCnt(rwCnt)}`;
   let itemIdx = state.itemIdxByKey[key] ?? 0;
   itemIdx = Math.min(itemIdx, Math.max(items.length - 1, 0));
   state.itemIdxByKey[key] = itemIdx;

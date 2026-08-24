@@ -531,6 +531,33 @@ def norm_wafer(value):
         return str(value).strip()
 
 
+def norm_rw_cnt(value) -> str:
+    """Canonical rw_cnt for matching a list row back to its own dc rows.
+
+    The list groups on (lot_id, rw_cnt), and everything on the right --
+    trend, control limits, comment -- is then looked up with that pair. A
+    plain `==` breaks that lookup twice over: a missing rw_cnt is NaN, and
+    NaN never equals itself, so the row sits in the list with an empty
+    chart beside it; and 0 vs 0.0 miss each other whenever one frame came
+    back float and the other int. Both collapse to one text key here, with
+    blank/NaN treated as its own bucket rather than dropped.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text == "":
+        return ""
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
+
+
 def to_float(value) -> float | None:
     """Best-effort float, e.g. for a BigQuery NUMERIC that came back as
     text or Decimal. None (not NaN) so callers can tell "absent" from
@@ -1038,7 +1065,7 @@ def show_dc_ocap():
         if pending_switch and pending_switch.get("product") == selected_product:
             match_idx = grouped.index[
                 (grouped["lot_id"] == pending_switch["lot_id"])
-                & (grouped["rw_cnt"] == pending_switch["rw_cnt"])
+                & grouped["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(pending_switch["rw_cnt"]))
             ]
             if len(match_idx):
                 st.session_state[table_key] = {
@@ -1103,13 +1130,16 @@ def show_dc_ocap():
         # the item list, control limits and paging state below would mix the
         # two events together
         lot_rows = (
-            dc_df[(dc_df["lot_id"] == lot_id) & (dc_df["rw_cnt"] == rw_cnt)]
+            dc_df[
+                (dc_df["lot_id"] == lot_id)
+                & dc_df["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(rw_cnt))
+            ]
             if lot_id is not None else None
         )
 
         # one chart per measurement item, stepped through with the arrows
         items = list(dict.fromkeys(lot_rows["item_id"])) if lot_rows is not None else []
-        nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{lot_id}_{rw_cnt}"
+        nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{lot_id}_{norm_rw_cnt(rw_cnt)}"
         item_idx = min(st.session_state.get(nav_key, 0), max(len(items) - 1, 0))
         item_id = items[item_idx] if items else None
 
@@ -1218,7 +1248,8 @@ def show_dc_ocap():
                             # recent rework
                             if not click_rows.empty:
                                 current = click_rows[
-                                    (click_rows["lot_id"] == lot_id) & (click_rows["rw_cnt"] == rw_cnt)
+                                    (click_rows["lot_id"] == lot_id)
+                                    & click_rows["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(rw_cnt))
                                 ]
                                 pick = (
                                     current if not current.empty
@@ -1229,7 +1260,10 @@ def show_dc_ocap():
                             else:
                                 click_lot_id = None
                                 click_rw_cnt = None
-                            if click_lot_id is not None and (click_lot_id, click_rw_cnt) != (lot_id, rw_cnt):
+                            if click_lot_id is not None and (
+                                (click_lot_id, norm_rw_cnt(click_rw_cnt))
+                                != (lot_id, norm_rw_cnt(rw_cnt))
+                            ):
                                 # the list widget was already instantiated this
                                 # run, so its selection can't be seeded until the
                                 # next run - see pending_switch handling above
@@ -1242,10 +1276,13 @@ def show_dc_ocap():
                                 new_lot_items = list(dict.fromkeys(
                                     dc_df[
                                         (dc_df["lot_id"] == click_lot_id)
-                                        & (dc_df["rw_cnt"] == click_rw_cnt)
+                                        & dc_df["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(click_rw_cnt))
                                     ]["item_id"]
                                 ))
-                                new_nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{click_lot_id}_{click_rw_cnt}"
+                                new_nav_key = (
+                                    f"{KEY_PREFIX}item_idx_{selected_product}"
+                                    f"_{click_lot_id}_{norm_rw_cnt(click_rw_cnt)}"
+                                )
                                 st.session_state[new_nav_key] = (
                                     new_lot_items.index(item_id) if item_id in new_lot_items else 0
                                 )
