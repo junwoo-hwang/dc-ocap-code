@@ -1165,20 +1165,24 @@ def show_dc_ocap():
                 )
 
     with right:
-        st.subheader("Item Trend")
-        # DC HOLD 바로가기 + 데이터 시각. 둘 다 trend 박스 바로 위에 붙는다.
+        # 제목과 링크/데이터 시각을 한 줄에 둔다. st.subheader 를 따로 쓰면
+        # 제목과 이 블록이 두 줄로 쌓여 패널이 그만큼 아래로 밀리므로, 하나의
+        # flex 로 직접 그린다. align-items:flex-end 라 오른쪽 블록의 아랫줄이
+        # 제목 밑선과 나란히 떨어진다.
         # href 는 반드시 절대주소(https://go/...)여야 한다 -- "go/dcocap" 만
         # 쓰면 현재 페이지 기준 상대경로로 붙어서 포털 안쪽 주소로 새고,
         # 주소창에 칠 때처럼 호스트명으로 풀리지 않는다.
-        # text-align:right -- 이 블록은 trend 패널과 같은 컬럼을 꽉 채우므로
-        # 오른쪽 정렬하면 둘 다 패널 오른쪽 끝선에 맞는다
+        # 오른쪽 블록의 text-align:right 가 trend 패널 오른쪽 끝선을 맞춘다.
         st.markdown(
-            f"<div style='margin-bottom:0.35rem; text-align:right;'>"
+            f"<div style='display:flex; align-items:flex-end; "
+            f"justify-content:space-between; gap:1rem; margin-bottom:0.35rem;'>"
+            f"<h3 style='margin:0; padding:0;'>Item Trend</h3>"
+            f"<div style='text-align:right;'>"
             f"<a class='dc-hold-link' href='{DC_HOLD_URL}' target='_blank' rel='noopener'>"
             f"DC HOLD LINK</a>"
             f"<div style='font-size:0.8rem; color:#888; margin-top:0.3rem;'>"
             f"(Latest Data : {data_loaded_at})</div>"
-            f"</div>",
+            f"</div></div>",
             unsafe_allow_html=True,
         )
         product = selected_product
