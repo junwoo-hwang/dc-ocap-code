@@ -15,17 +15,22 @@
      both live inside the h1 so 0.42em resolves against the same size */
   h1 .ts { font-size: 0.42em; font-weight: 400; color: #888; line-height: 1.35; }
   h1 .ts.counts { display: inline-block; vertical-align: bottom; }
-  /* 제목(왼쪽) + DC HOLD 링크/데이터 시각(오른쪽)을 한 줄에.
-     오른쪽 블록은 text-align:right 라 패널 오른쪽 끝선에 맞는다 */
-  .trend-head {
-    display: flex; align-items: flex-end; justify-content: space-between;
-    gap: 1rem; margin-bottom: 6px;
+  /* 윗줄: DC HOLD 링크(오른쪽 끝). 아랫줄: 제목(왼쪽) + 데이터 시각(오른쪽).
+     둘 다 패널과 같은 폭이라 오른쪽 정렬이 곧 패널 끝선이 된다.
+     왼쪽 컬럼도 헤더가 두 줄(제목+필터 / 제품전환)이라 이렇게 두 줄로 두면
+     양쪽 패널 윗선이 같은 높이에서 시작한다. */
+  /* 3px: 왼쪽 헤더(제목+필터 / 제품전환)보다 이쪽이 딱 그만큼 높아서,
+     이 여백으로 깎아야 양쪽 패널 윗선이 같은 높이에 온다 */
+  .trend-head { margin-bottom: 2px; }
+  .trend-head-top { text-align: right; margin-bottom: 6px; }
+  .trend-head-bottom {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem;
   }
-  .trend-head h2 { margin: 0; }
-  .trend-head-right { text-align: right; }
-  .trend-head-right .stamp-line { font-size: 0.8rem; color: #888; margin-top: 5px; }
+  .trend-head-bottom h2 { margin: 0; }
+  .trend-head-bottom .stamp-line { font-size: 0.8rem; color: #888; }
   a.dc-hold-link {
-    display: inline-block; padding: 4px 14px;
+    /* line-height 를 못 박아 둔다 (app.py 와 동일 규격) */
+    display: inline-block; padding: 3px 14px; line-height: 1.35;
     border: 1px solid #d0d3d9; border-radius: 8px;
     background: #fff; color: #d33; font-size: 0.85rem; font-weight: 700;
     text-decoration: none;
@@ -78,8 +83,9 @@
 
   #listPanel { height: 400px; }
   #detailPanel { height: 250px; margin-top: 10px; }
-  #trendPanel { height: 434px; }
-  #commentPanel { height: 216px; margin-top: 10px; }
+  /* trend 는 왼쪽 list 와 같은 높이, comment 는 detail 과 같은 높이 */
+  #trendPanel { height: 400px; }
+  #commentPanel { height: 250px; margin-top: 10px; }
 
   .nav-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
   .nav-row button.nav-arrow {
@@ -159,9 +165,11 @@
            상대경로로 붙어 포털 안쪽 주소로 샌다. 정적 리포트는 iframe 안에서
            열리므로 target="_blank" 로 바깥 탭에 띄운다. -->
       <div class="trend-head">
-        <h2>Item Trend</h2>
-        <div class="trend-head-right">
+        <div class="trend-head-top">
           <a class="dc-hold-link" href="https://go/dcocap" target="_blank" rel="noopener">DC HOLD LINK</a>
+        </div>
+        <div class="trend-head-bottom">
+          <h2>Item Trend</h2>
           <div class="stamp-line">(Latest Data : __GENERATED_AT__)</div>
         </div>
       </div>

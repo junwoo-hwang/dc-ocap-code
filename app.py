@@ -1037,7 +1037,9 @@ def show_dc_ocap():
            네모 박스로 그린다 (st.link_button 은 이 자리에서 폭/여백이
            제멋대로라 마크업으로 직접 그림) */
         a.dc-hold-link {
-            display: inline-block; padding: 0.25rem 0.9rem;
+            /* line-height 를 못 박아 둔다. 기본값이면 브라우저마다 버튼
+               높이가 달라져 왼쪽 컬럼과 헤더 높이를 맞춰둔 게 어긋난다 */
+            display: inline-block; padding: 3px 14px; line-height: 1.35;
             border: 1px solid #d0d3d9; border-radius: 8px;
             background: #fff; color: #d33 !important;
             font-size: 0.85rem; font-weight: 700; text-decoration: none !important;
@@ -1049,12 +1051,16 @@ def show_dc_ocap():
     )
 
     PANEL_HEIGHT = 650
-    TREND_HEIGHT = round(PANEL_HEIGHT * 2 / 3)
-    COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
-    # the left column splits the same total between the grouped list and the
-    # breakdown of whichever lot is selected, so both columns still end level
+    # the left column splits the total between the grouped list and the
+    # breakdown of whichever lot is selected
     LIST_HEIGHT = 400
     DETAIL_HEIGHT = PANEL_HEIGHT - LIST_HEIGHT
+    # trend matches the list box beside it, so comment matches the breakdown --
+    # both columns still add up to PANEL_HEIGHT and end level. This works
+    # because the right header is two rows now (link, then title + timestamp),
+    # same as the left's (title + filter, then product switch)
+    TREND_HEIGHT = LIST_HEIGHT
+    COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
     DETAIL_COLS = ["rw_cnt", "wafer_id", "item_id", "hold_inform"]
     # tracks the last wafer point clicked in the trend chart, independent of
     # any one widget's key, so it survives the list/nav-index switch a click
@@ -1173,14 +1179,19 @@ def show_dc_ocap():
         # 쓰면 현재 페이지 기준 상대경로로 붙어서 포털 안쪽 주소로 새고,
         # 주소창에 칠 때처럼 호스트명으로 풀리지 않는다.
         # 오른쪽 블록의 text-align:right 가 trend 패널 오른쪽 끝선을 맞춘다.
+        # 한 블록으로 그린다. st.subheader 를 쓰면 그 자체가 별도 블록이라
+        # 링크/시각과 같은 줄에 못 오고, 블록마다 streamlit 이 여백을 넣어
+        # 왼쪽 컬럼보다 헤더가 훨씬 두꺼워진다. 폰트 크기는 정적 리포트의
+        # h2(1.4rem)와 맞춰 두 화면이 같아 보이게 한다.
         st.markdown(
-            f"<div style='display:flex; align-items:flex-end; "
-            f"justify-content:space-between; gap:1rem; margin-bottom:0.35rem;'>"
-            f"<h3 style='margin:0; padding:0;'>Item Trend</h3>"
+            f"<div style='margin-bottom:0;'>"
             f"<div style='text-align:right;'>"
             f"<a class='dc-hold-link' href='{DC_HOLD_URL}' target='_blank' rel='noopener'>"
-            f"DC HOLD LINK</a>"
-            f"<div style='font-size:0.8rem; color:#888; margin-top:0.3rem;'>"
+            f"DC HOLD LINK</a></div>"
+            f"<div style='display:flex; align-items:flex-end; "
+            f"justify-content:space-between; gap:1rem;'>"
+            f"<div style='font-size:1.4rem; font-weight:700; line-height:1;'>Item Trend</div>"
+            f"<div style='font-size:0.8rem; color:#888;'>"
             f"(Latest Data : {data_loaded_at})</div>"
             f"</div></div>",
             unsafe_allow_html=True,
