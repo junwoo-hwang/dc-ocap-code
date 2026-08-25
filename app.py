@@ -382,7 +382,7 @@ GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform"
 # hold 를 실제로 푸는 사내 사이트. go/dcocap 은 사내 단축주소라서 반드시
 # 스킴을 붙여야 한다 -- href="go/dcocap" 은 현재 페이지 기준 상대경로로
 # 해석되어 포털 안쪽 주소로 새고, 주소창에 칠 때처럼 호스트로 풀리지 않는다.
-DC_HOLD_URL = "http://go/dcocap"
+DC_HOLD_URL = "https://go/dcocap"
 
 
 def sort_wafers(values) -> list:
@@ -1167,7 +1167,7 @@ def show_dc_ocap():
     with right:
         st.subheader("Item Trend")
         # DC HOLD 바로가기 + 데이터 시각. 둘 다 trend 박스 바로 위에 붙는다.
-        # href 는 반드시 절대주소(http://go/...)여야 한다 -- "go/dcocap" 만
+        # href 는 반드시 절대주소(https://go/...)여야 한다 -- "go/dcocap" 만
         # 쓰면 현재 페이지 기준 상대경로로 붙어서 포털 안쪽 주소로 새고,
         # 주소창에 칠 때처럼 호스트명으로 풀리지 않는다.
         # text-align:right -- 이 블록은 trend 패널과 같은 컬럼을 꽉 채우므로
