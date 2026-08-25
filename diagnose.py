@@ -149,9 +149,16 @@ def check_columns(product_dc, product_trend):
 
 
 def check_check_data(product_dc, product_trend):
-    problems = safe("check_data()", app.check_data, product_dc, product_trend)
-    if problems is None:
+    result = safe("check_data()", app.check_data, product_dc, product_trend)
+    if result is None:
         return
+    problems, warnings = result
+    if warnings:
+        # 대시보드는 정상 동작하는 항목들. 화면을 막지 않으므로 참고로만.
+        print(f"  [참고 {len(warnings)}건 - 대시보드는 정상 동작]")
+        for w in warnings:
+            print("    · " + w)
+        note(3, "check_data() 참고사항 (화면은 정상 동작)", *warnings)
     if problems:
         for p in problems:
             print("  - " + p)

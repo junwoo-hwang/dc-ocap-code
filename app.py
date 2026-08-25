@@ -586,16 +586,26 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
-    """Return human-readable problems with what pull_data() handed back.
+def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[str]]:
+    """Return (fatal, warnings) about what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
     mismatch reads as a plain list of what to fix instead of a KeyError.
     Called from inside the cached load_data(), because scanning full
     trend tables on every rerun would cost more than the checks are
     worth (~0.8s per click on 200k rows).
+
+    The split matters: only things that actually stop the dashboard from
+    working belong in `fatal`, because the caller refuses to render on
+    those. A wiring mistake (wrong column, wrong dtype, nothing matching
+    at all) is fatal. Real-world data mess -- a handful of wafers that
+    never made it into trend, an item with no trend column -- is a
+    warning, because the page handles it: the chart simply has no red dot
+    or shows its own "not found" box, and blocking the whole dashboard
+    over one row out of hundreds is worse than the missing dot.
     """
-    problems = []
+    fatal, warnings = [], []
+    problems = fatal  # 기존 검사들이 쓰던 이름 유지 (치명적 목록)
     for product in product_dc:
         dc_df, trend_df = product_dc[product], trend_frames[product]
 
@@ -647,22 +657,35 @@ def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
                 continue
             bad_count = dc_df[limit_col].map(lambda v: to_float(v) is None and pd.notna(v)).sum()
             if bad_count:
-                problems.append(
+                # build_scatter 가 to_float 로 한 번 더 거르므로 그리다 죽지는
+                # 않고, 해당 행의 관리선만 안 그려진다 -> 경고로 충분
+                warnings.append(
                     f"dc_{product.lower()}: {limit_col} 의 {bad_count}개 값이 숫자로 "
-                    f"변환되지 않습니다 (dtype={dc_df[limit_col].dtype}). float 로 변환하세요."
+                    f"변환되지 않습니다 (dtype={dc_df[limit_col].dtype}). "
+                    f"해당 hold 는 관리선이 안 그려집니다. float 로 변환하세요."
                 )
 
         # dc.item_id must name a real column in that product's trend
         # (case-insensitively -- resolve_item_col handles the difference)
         if "item_id" in dc_df.columns and not dc_df.empty:
+            all_items = set(dc_df["item_id"])
             unknown = sorted(
-                str(i) for i in set(dc_df["item_id"])
-                if resolve_item_col(trend_df, i) is None
+                str(i) for i in all_items if resolve_item_col(trend_df, i) is None
             )
-            if unknown:
+            if unknown and len(unknown) == len(all_items):
+                # 하나도 안 맞으면 컬럼명 규칙 자체가 어긋난 것 (배선 실수)
                 problems.append(
+                    f"dc_{product.lower()}: item_id 가 {product.lower()}_trend 의 "
+                    f"컬럼과 하나도 매칭되지 않습니다. dc 예시 {unknown[:5]}, "
+                    f"trend 컬럼 예시 {[str(c) for c in trend_df.columns[:5]]}"
+                )
+            elif unknown:
+                # 일부만 없는 것은 흔한 일이고, 그 item 을 고르면 화면이
+                # "매칭되는 trend 데이터를 찾지 못했습니다" 를 직접 띄운다
+                warnings.append(
                     f"dc_{product.lower()}: item_id {unknown[:5]} 이(가) "
-                    f"{product.lower()}_trend 의 컬럼에 없습니다."
+                    f"{product.lower()}_trend 의 컬럼에 없습니다 "
+                    f"(총 {len(unknown)}/{len(all_items)}종, 해당 item 은 차트가 안 뜸)."
                 )
 
         # a hold finds its wafer by the (root_lot_id, wafer_id) pair. The
@@ -682,12 +705,14 @@ def check_data(product_dc: dict, trend_frames: dict) -> list[str]:
                     f"dc 예시 {sorted(missing)[:3]}"
                 )
             elif missing:
-                problems.append(
+                # 일부만 없는 것: 그 wafer 만 빨간 점이 안 찍히고 나머지는
+                # 정상이다. bad_pairs 는 단순 집합 조회라 죽지도 않는다.
+                warnings.append(
                     f"dc_{product.lower()}: {len(missing)}/{len(dc_pairs)} 건의 "
                     f"(root_lot_id, wafer_id) 가 {product.lower()}_trend 에 없습니다 "
                     f"(해당 hold 는 빨간 점이 안 찍힘). 예시 {sorted(missing)[:3]}"
                 )
-    return problems
+    return fatal, warnings
 
 
 # Streamlit re-runs show_dc_ocap() on every click (the portal reruns its
@@ -702,14 +727,14 @@ def load_data():
     dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
-    problems = check_data(
+    problems, warnings = check_data(
         {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
         {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
     )
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
     loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
-    return (*frames, loaded_at, problems)
+    return (*frames, loaded_at, problems, warnings)
 
 
 LEGEND_FIELD_OPTIONS = {
@@ -949,7 +974,8 @@ def show_dc_ocap():
     with layout="wide" -- that call can only happen once per app and
     must be the first streamlit command, so it doesn't belong in here.
     """
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend, data_loaded_at, problems = load_data()
+    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     data_loaded_at, problems, data_warnings) = load_data()
 
     trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
     product_dc = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
@@ -959,6 +985,13 @@ def show_dc_ocap():
         for p in problems:
             st.write("- " + p)
         st.stop()
+
+    # 치명적이지 않은 것들은 접어서 보여준다. 일부 wafer 가 trend 에 없는
+    # 정도로 대시보드 전체를 막으면, 정작 멀쩡한 나머지 hold 를 못 본다.
+    if data_warnings:
+        with st.expander(f"⚠️ 데이터 참고사항 {len(data_warnings)}건 (대시보드는 정상 동작)"):
+            for w in data_warnings:
+                st.write("- " + w)
 
     # both small texts sit inside the h1 so their 0.42em resolves against
     # the same heading size -- that keeps them identical without having to
@@ -1408,13 +1441,17 @@ def build_dc_ocap_html() -> Path:
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
-    # a broken dc_ocap.html
-    problems = check_data(product_dc, product_trend)
+    # a broken dc_ocap.html. Warnings are printed but must not stop the
+    # build: this runs hourly and uploads to S3, so failing over a few
+    # wafers missing from trend would freeze the portal on a stale report.
+    problems, warnings = check_data(product_dc, product_trend)
     if problems:
         raise SystemExit(
             "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
             + "\n".join(f"- {p}" for p in problems)
         )
+    for w in warnings:
+        print(f"  참고: {w}")
 
     data = {
         "dc": {p: _columns(product_dc[p]) for p in product_dc},
