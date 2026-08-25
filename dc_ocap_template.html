@@ -14,9 +14,17 @@
   /* the counts and the timestamp share one style so they render alike;
      both live inside the h1 so 0.42em resolves against the same size */
   h1 .ts { font-size: 0.42em; font-weight: 400; color: #888; line-height: 1.35; }
-  h1 .head-row { display: flex; align-items: flex-end; justify-content: space-between; }
   h1 .ts.counts { display: inline-block; vertical-align: bottom; }
-  h1 .ts.stamp { white-space: nowrap; padding-left: 1rem; }
+  /* DC HOLD 바로가기 + 데이터 시각. 둘 다 trend 박스 바로 위에 놓인다 */
+  .trend-head { margin-bottom: 6px; text-align: right; }
+  .trend-head .stamp-line { font-size: 0.8rem; color: #888; margin-top: 5px; }
+  a.dc-hold-link {
+    display: inline-block; padding: 4px 14px;
+    border: 1px solid #d0d3d9; border-radius: 8px;
+    background: #fff; color: #d33; font-size: 0.85rem; font-weight: 700;
+    text-decoration: none;
+  }
+  a.dc-hold-link:hover { background: #fff1f0; border-color: #d33; }
   h2 { margin: 0 0 8px 0; font-size: 1.4rem; }
   .layout { display: flex; gap: 24px; align-items: flex-start; }
   .left { flex: 2; min-width: 0; }
@@ -96,10 +104,7 @@
 </head>
 <body>
 <div id="app">
-  <h1><span class="head-row">
-    <span>Hold 현황 <span class="ts counts" id="newHoldCounts"></span></span>
-    <span class="ts stamp">(Latest Data : __GENERATED_AT__)</span>
-  </span></h1>
+  <h1>Hold 현황 <span class="ts counts" id="newHoldCounts"></span></h1>
 
   <div class="layout">
     <div class="left">
@@ -143,6 +148,13 @@
 
     <div class="right">
       <h2>Item Trend</h2>
+      <!-- href 는 반드시 절대주소(http://go/...). "go/dcocap" 만 쓰면 현재
+           페이지 기준 상대경로로 붙어 포털 안쪽 주소로 샌다. 정적 리포트는
+           iframe 안에서 열리므로 target="_blank" 로 바깥 탭에 띄운다. -->
+      <div class="trend-head">
+        <a class="dc-hold-link" href="http://go/dcocap" target="_blank" rel="noopener">DC HOLD LINK</a>
+        <div class="stamp-line">(Latest Data : __GENERATED_AT__)</div>
+      </div>
       <div class="panel" id="trendPanel"></div>
       <div class="panel" id="commentPanel"></div>
     </div>

@@ -379,6 +379,11 @@ TREND_REQUIRED = [
 # few days later, so as a displayed value it just goes stale.
 GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
 
+# hold 를 실제로 푸는 사내 사이트. go/dcocap 은 사내 단축주소라서 반드시
+# 스킴을 붙여야 한다 -- href="go/dcocap" 은 현재 페이지 기준 상대경로로
+# 해석되어 포털 안쪽 주소로 새고, 주소창에 칠 때처럼 호스트로 풀리지 않는다.
+DC_HOLD_URL = "http://go/dcocap"
+
 
 def sort_wafers(values) -> list:
     """Wafer numbers in numeric order, with any non-numeric ones last."""
@@ -993,20 +998,17 @@ def show_dc_ocap():
             for w in data_warnings:
                 st.write("- " + w)
 
-    # both small texts sit inside the h1 so their 0.42em resolves against
-    # the same heading size -- that keeps them identical without having to
-    # hardcode whatever px streamlit's h1 currently renders at
+    # the counts sit inside the h1 so their 0.42em resolves against the same
+    # heading size -- that keeps them consistent without having to hardcode
+    # whatever px streamlit's h1 currently renders at. "Latest Data" used to
+    # sit here too but now rides just above the trend panel, next to the
+    # DC HOLD link.
     meta_style = "font-size:0.42em; font-weight:400; color:#888; line-height:1.35;"
     new_counts = ", ".join(f"{p} : {count_new_holds(product_dc[p])}건" for p in product_dc)
     st.markdown(
-        f"# <span style='display:flex; align-items:flex-end; justify-content:space-between;'>"
-        f"<span>Hold 현황 "
+        f"# Hold 현황 "
         f"<span style='display:inline-block; vertical-align:bottom; {meta_style}'>"
-        f"신규 hold 건수<br>{new_counts}</span></span>"
-        # right-aligned, so it lands on the same edge as the trend panel below
-        f"<span style='{meta_style} white-space:nowrap; padding-left:1rem;'>"
-        f"(Latest Data : {data_loaded_at})</span>"
-        f"</span>",
+        f"신규 hold 건수<br>{new_counts}</span>",
         unsafe_allow_html=True,
     )
 
@@ -1031,6 +1033,16 @@ def show_dc_ocap():
         div[data-testid="stButtonGroup"] button[data-variant="segmented_control"] p {
             font-size: 0.8rem !important;
         }
+        /* DC HOLD 바로가기. 사내 단축주소로 나가는 링크라 버튼처럼 보이게
+           네모 박스로 그린다 (st.link_button 은 이 자리에서 폭/여백이
+           제멋대로라 마크업으로 직접 그림) */
+        a.dc-hold-link {
+            display: inline-block; padding: 0.25rem 0.9rem;
+            border: 1px solid #d0d3d9; border-radius: 8px;
+            background: #fff; color: #d33 !important;
+            font-size: 0.85rem; font-weight: 700; text-decoration: none !important;
+        }
+        a.dc-hold-link:hover { background: #fff1f0; border-color: #d33; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1154,6 +1166,21 @@ def show_dc_ocap():
 
     with right:
         st.subheader("Item Trend")
+        # DC HOLD 바로가기 + 데이터 시각. 둘 다 trend 박스 바로 위에 붙는다.
+        # href 는 반드시 절대주소(http://go/...)여야 한다 -- "go/dcocap" 만
+        # 쓰면 현재 페이지 기준 상대경로로 붙어서 포털 안쪽 주소로 새고,
+        # 주소창에 칠 때처럼 호스트명으로 풀리지 않는다.
+        # text-align:right -- 이 블록은 trend 패널과 같은 컬럼을 꽉 채우므로
+        # 오른쪽 정렬하면 둘 다 패널 오른쪽 끝선에 맞는다
+        st.markdown(
+            f"<div style='margin-bottom:0.35rem; text-align:right;'>"
+            f"<a class='dc-hold-link' href='{DC_HOLD_URL}' target='_blank' rel='noopener'>"
+            f"DC HOLD LINK</a>"
+            f"<div style='font-size:0.8rem; color:#888; margin-top:0.3rem;'>"
+            f"(Latest Data : {data_loaded_at})</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         product = selected_product
 
         lot_id = sel_lot_id
