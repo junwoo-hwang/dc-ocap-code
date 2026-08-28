@@ -1196,6 +1196,14 @@ function renderWac() {
   const grid = document.getElementById("wacGrid");
   const empty = document.getElementById("wacEmpty");
   if (wacObserver) wacObserver.disconnect();
+  // 그린 차트는 반드시 purge 하고 버린다. innerHTML="" 로 노드만 떼면
+  // Plotly 가 responsive 용으로 window 에 걸어둔 resize 핸들러가 남아
+  // 떨어져 나간 div 와 그 안의 데이터를 계속 붙잡는다. 제품 전환/검색을
+  // 반복하면 핸들러와 메모리가 그만큼 쌓인다(21회 전환에 +30MB 확인)
+  for (const e of wacCharts) {
+    if (e.drawn) Plotly.purge(e.div);
+    delete e.div._wacEntry;
+  }
   wacCharts = [];
   grid.innerHTML = "";
   if (!items.length) {

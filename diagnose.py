@@ -420,7 +420,131 @@ def check_join(product_dc, product_trend):
 
 
 # ====================================================================
-# 7. 리스트 -> 우측 패널 시뮬레이션
+# 7. 관리선(spec) 이 시간순으로 말이 되는가
+# ====================================================================
+def _limit_tuple(row):
+    """한 행의 관리선 4개를 비교 가능한 튜플로. 숫자가 아니면 None."""
+    out = []
+    for w in app.LIMIT_COLS:
+        v = app.to_float(row.get(w))
+        out.append(None if v is None else round(v, 6))
+    return tuple(out)
+
+
+def check_spec_quality(product_spec, product_trend):
+    """spec 을 '개정 이력' 으로 읽었을 때 앞뒤가 맞는지 본다.
+
+    spec 은 (item_id, from_time) 마다 한 벌이어야 하고, 시간이 갈수록
+    한 방향으로 바뀌어야 합니다. 실제로 자주 깨지는 건 두 가지입니다:
+
+      · 같은 item + 같은 from_time 에 규격이 두 벌 -- 그러면 merge_asof
+        가 그 중 아무거나(뒤에 오는 행) 집어가고, 차트의 관리선이
+        조회할 때마다 달라 보입니다.
+      · A -> B -> A 처럼 값이 되돌아옴 -- 이건 개정이 아니라 서로 다른
+        기준 두 벌이 한 테이블에 섞여 들어온 것입니다. item_id 와
+        시각만으로는 어느 쪽인지 못 가리므로, 뽑는 쿼리에 조건을 하나
+        더 걸어야 합니다 (설비/스텝/라인 등).
+
+    둘 다 화면에는 에러가 안 뜨고 '관리선이 왔다갔다' 로만 보입니다.
+    """
+    for name, df in product_spec.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        if [c for c in app.SPEC_REQUIRED if c not in df.columns]:
+            continue
+        sp = df[app.SPEC_REQUIRED].copy()
+        sp["from_time"] = pd.to_datetime(sp["from_time"], errors="coerce")
+        n_bad_time = int(sp["from_time"].isna().sum())
+        sp = sp.dropna(subset=["from_time"])
+        sp["_key"] = sp["item_id"].astype(str).str.strip().str.lower()
+        print(f"\n  [{name}]  {len(df):,} 행 / item {sp['_key'].nunique()} 종")
+        if n_bad_time:
+            print(f"     !! from_time 이 날짜로 안 읽히는 행 {n_bad_time}건 -> 그 개정은 통째로 빠짐")
+            note(2, f"[{name}] spec.from_time 이 날짜로 안 읽히는 행 {n_bad_time}건",
+                 "그 개정은 관리선 계산에서 통째로 빠집니다.")
+
+        # 관리선이 4개 다 비어있는 행: 규격 설정 전의 껍데기 행
+        empty_rows = int(sp.apply(lambda r: _limit_tuple(r) == (None,) * 4, axis=1).sum())
+        if empty_rows:
+            print(f"     !! 관리선이 4개 다 비어있는 행 {empty_rows}/{len(sp)}건")
+            note(2, f"[{name}] spec 에 관리선이 전부 빈 행 {empty_rows}건",
+                 "규격 설정 전 행으로 보입니다. 뽑을 때 걸러내세요:",
+                 "  et_data = et_data[pd.to_numeric(et_data['ucl'], errors='coerce').notna()]")
+
+        dup_items, flip_items, inv_items = [], [], []
+        for key, grp in sp.groupby("_key", observed=True, sort=False):
+            grp = grp.sort_values("from_time")
+            tuples = [_limit_tuple(r) for _, r in grp.iterrows()]
+            times = list(grp["from_time"])
+
+            # (1) 같은 시각에 서로 다른 규격
+            by_time = {}
+            for t, tup in zip(times, tuples):
+                by_time.setdefault(t, set()).add(tup)
+            clash = [t for t, s in by_time.items() if len(s) > 1]
+            if clash:
+                dup_items.append((key, len(clash), min(clash)))
+
+            # (2) 값이 되돌아옴 (A -> B -> A)
+            seq = [t for i, t in enumerate(tuples) if i == 0 or t != tuples[i - 1]]
+            if len(seq) > len(set(seq)):
+                flip_items.append((key, len(set(seq)), len(grp)))
+
+            # (3) 규격 자체가 뒤집힘
+            for t, (ucl, lcl, usl, lsl) in zip(times, tuples):
+                if None in (usl, lsl) or usl > lsl:
+                    if None in (ucl, lcl) or ucl > lcl:
+                        continue
+                inv_items.append((key, t))
+                break
+
+        if dup_items:
+            worst = sorted(dup_items, key=lambda x: -x[1])[:5]
+            print(f"     !! 같은 item + 같은 from_time 에 규격이 2벌 이상: {len(dup_items)} 종")
+            for k, n, t in worst:
+                print(f"        {k}: {n}개 시각에서 충돌 (예: {t})")
+            note(1, f"[{name}] 같은 item+시각에 규격이 2벌인 item {len(dup_items)}종",
+                 *[f"{k}: {n}개 시각 충돌 (예: {t})" for k, n, t in worst],
+                 "merge_asof 가 그 중 뒤 행을 집어가므로 관리선이 임의로 정해집니다.",
+                 "item_id + from_time 이 유일해지도록 한 벌만 남기고 뽑으세요.")
+        if flip_items:
+            worst = sorted(flip_items, key=lambda x: -x[2])[:5]
+            print(f"     !! 값이 되돌아오는(A->B->A) item: {len(flip_items)} 종")
+            for k, distinct, rows in worst:
+                print(f"        {k}: {rows}행인데 규격은 {distinct}벌뿐 -- 두 기준이 섞여 있음")
+            note(2, f"[{name}] 규격이 A->B->A 로 되돌아오는 item {len(flip_items)}종",
+                 *[f"{k}: {rows}행 / 규격 {distinct}벌" for k, distinct, rows in worst],
+                 "정상 개정이면 값은 한 방향으로만 갑니다. 되돌아온다는 건",
+                 "서로 다른 기준 두 벌이 한 테이블에 섞였다는 뜻입니다.",
+                 "item_id 말고 어떤 컬럼이 두 벌을 가르는지 찾아서 조건을 거세요",
+                 "(그 컬럼으로 나눴을 때 각 그룹의 규격이 한 벌이면 그게 답입니다).")
+        if inv_items:
+            print(f"     !! 상한 <= 하한 인 item: {len(inv_items)} 종 (예: {inv_items[0][0]})")
+            note(2, f"[{name}] 상한이 하한보다 작거나 같은 item {len(inv_items)}종",
+                 *[f"{k} ({t})" for k, t in inv_items[:5]],
+                 "usl/lsl 또는 ucl/lcl 이 서로 바뀐 것 같습니다.")
+
+        # 개정 시점이 trend 구간과 맞물리는가
+        late_start = 0
+        tr = product_trend.get(name)
+        if isinstance(tr, pd.DataFrame) and not tr.empty and "tkout_time" in tr.columns:
+            t_min, t_max = tr["tkout_time"].min(), tr["tkout_time"].max()
+            later = int((sp["from_time"] > t_max).sum())
+            first = sp.groupby("_key", observed=True)["from_time"].min()
+            late_start = int((first > t_min).sum())
+            print(f"     trend 구간 {t_min:%Y-%m-%d} ~ {t_max:%Y-%m-%d} 기준: "
+                  f"구간 뒤 개정 {later}행, 첫 개정이 구간 시작보다 늦은 item {late_start}종")
+            if late_start:
+                note(3, f"[{name}] 첫 개정이 trend 시작보다 늦은 item {late_start}종",
+                     "그 이전 구간은 관리선이 없어 회색으로만 그려집니다 "
+                     "(spec 을 trend 보다 넉넉히 뽑으면 사라집니다).")
+        if not (dup_items or flip_items or inv_items or empty_rows
+                or n_bad_time or late_start):
+            print("     이상 없음")
+
+
+# ====================================================================
+# 8. 리스트 -> 우측 패널 시뮬레이션
 # ====================================================================
 def check_row_click(product_dc, product_trend):
     """리스트의 각 줄을 실제로 눌러본 것처럼 우측 패널을 계산해 본다.
@@ -481,7 +605,7 @@ def check_row_click(product_dc, product_trend):
 
 
 # ====================================================================
-# 8. 요약
+# 9. 요약
 # ====================================================================
 def summary(product_dc):
     total_lots = hold_lots = 0
@@ -560,11 +684,14 @@ def main():
     head("6. dc 와 trend 가 서로 연결되는가 (차트가 비는 원인)")
     safe("6단계", check_join, product_dc, product_trend)
 
-    head("7. 리스트 행을 클릭하면 우측이 뜨는가 (시뮬레이션)")
-    safe("7단계", check_row_click, product_dc, product_trend)
+    head("7. 관리선(spec) 이 시간순으로 말이 되는가  << 관리선이 왔다갔다 할 때")
+    safe("7단계", check_spec_quality, product_spec, product_trend)
 
-    head("8. 요약")
-    safe("8단계", summary, product_dc)
+    head("8. 리스트 행을 클릭하면 우측이 뜨는가 (시뮬레이션)")
+    safe("8단계", check_row_click, product_dc, product_trend)
+
+    head("9. 요약")
+    safe("9단계", summary, product_dc)
 
 
 if __name__ == "__main__":

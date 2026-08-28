@@ -386,6 +386,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.offline as pyo
@@ -453,7 +454,14 @@ def item_spec_rows(spec_df, item_id) -> pd.DataFrame:
     rows["from_time"] = pd.to_datetime(rows["from_time"], errors="coerce")
     for w in LIMIT_COLS:
         rows[w] = pd.to_numeric(rows[w], errors="coerce") if w in rows.columns else np.nan
-    return rows.dropna(subset=["from_time"]).sort_values("from_time")
+    # 관리선 값까지 포함해 정렬한다. 같은 item 이 같은 from_time 에 두 벌
+    # 들어오는 일이 실제로 있는데(뽑는 쿼리에 조건이 하나 모자란 경우),
+    # from_time 만으로 정렬하면 '나중 행' 이 원본 행 순서에 따라 달라져서
+    # 같은 데이터인데 조회할 때마다 관리선이 달라 보인다. 두 벌 중 어느
+    # 쪽이 맞는지는 여기서 알 수 없으므로 고르지는 않고, 적어도 항상 같은
+    # 쪽이 고르도록만 해 둔다 (진짜 원인은 diagnose.py 7번이 짚어준다).
+    return (rows.dropna(subset=["from_time"])
+            .sort_values(["from_time", *LIMIT_COLS], na_position="first"))
 
 
 def limits_asof(spec_rows: pd.DataFrame, times) -> dict:
@@ -747,6 +755,36 @@ def check_data(product_dc: dict, trend_frames: dict,
                 problems.append(
                     f"{label}: {col} 의 {df[col].isna().mean():.0%} 가 NaT 입니다 "
                     f"(원본 값 형식이 pd.to_datetime 으로 파싱되지 않는 것으로 보입니다)."
+                )
+
+        # dc 가 가리키는 wafer 가 trend 에 실제로 있는가. 이게 어긋나면 hold
+        # 가 차트에 빨간 점으로 안 찍히는데, 화면에는 아무 오류도 안 뜬다.
+        # dtype 이 서로 달라도 norm_lot/norm_wafer 가 흡수하므로, 정규화한
+        # 쌍이 겹치는지만 본다.
+        pair_cols = {"root_lot_id", "wafer_id"}
+        if pair_cols <= set(dc_df.columns) and pair_cols <= set(trend_df.columns) and not dc_df.empty:
+            trend_pairs = set(zip(trend_df["root_lot_id"].map(norm_lot),
+                                  trend_df["wafer_id"].map(norm_wafer)))
+            dc_pairs = set(zip(dc_df["root_lot_id"].map(norm_lot),
+                               dc_df["wafer_id"].map(norm_wafer)))
+            missing = dc_pairs - trend_pairs
+            if missing and len(missing) == len(dc_pairs):
+                # 하나도 안 맞으면 배선이 틀린 것이다 (다른 컬럼을 뽑았거나
+                # 제품을 잘못 짝지었거나). 이건 막아야 한다.
+                problems.append(
+                    f"{product.lower()}_dc: (root_lot_id, wafer_id) 가 "
+                    f"{product.lower()}_trend 에서 하나도 매칭되지 않습니다. "
+                    f"dc 예시 {sorted(missing)[:3]}"
+                )
+            elif missing:
+                # 일부만 없는 것: 그 wafer 만 빨간 점이 안 찍히고 나머지는
+                # 정상이다. bad_pairs 는 단순 집합 조회라 죽지도 않는다.
+                # 흔한 원인은 dc 와 trend 의 조회 기간 기준이 다른 것
+                # (dc=hold_time, trend=tkout_time) 이다.
+                warnings.append(
+                    f"{product.lower()}_dc: {len(missing)}/{len(dc_pairs)} 건의 "
+                    f"(root_lot_id, wafer_id) 가 {product.lower()}_trend 에 없습니다 "
+                    f"(해당 hold 는 빨간 점이 안 찍힘). 예시 {sorted(missing)[:3]}"
                 )
 
         # ucl/lcl/usl/lsl must be numeric: plotly's add_hline raises a
@@ -1600,7 +1638,11 @@ def _spec_for_export(spec_df) -> pd.DataFrame:
         return pd.DataFrame(columns=SPEC_REQUIRED)
     out = spec_df[SPEC_REQUIRED].copy()
     out["from_time"] = pd.to_datetime(out["from_time"], errors="coerce")
-    return out.dropna(subset=["from_time"]).sort_values(["item_id", "from_time"])
+    # 관리선까지 넣어 정렬하는 이유는 item_spec_rows() 쪽과 같다. 브라우저의
+    # sort 는 안정 정렬이라, 여기 순서가 그대로 남아 같은 시각에 두 벌이
+    # 있어도 파이썬 화면과 정적 리포트가 같은 쪽을 고른다.
+    return (out.dropna(subset=["from_time"])
+            .sort_values(["item_id", "from_time", *LIMIT_COLS], na_position="first"))
 
 
 def build_dc_ocap_html() -> Path:
