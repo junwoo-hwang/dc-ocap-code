@@ -94,12 +94,12 @@ def sample_lots(df, mask, n=3):
 def check_shapes(product_dc, product_trend):
     for name, df in product_dc.items():
         if not isinstance(df, pd.DataFrame):
-            print(f"  dc_{name.lower():4s}: !! DataFrame 이 아님 ({type(df).__name__})")
-            note(1, f"dc_{name.lower()} 가 DataFrame 이 아님",
+            print(f"  {name.lower()}_dc  : !! DataFrame 이 아님 ({type(df).__name__})")
+            note(1, f"{name.lower()}_dc 가 DataFrame 이 아님",
                  f"실제 타입: {type(df).__name__}",
                  "pull_data() 가 DataFrame 을 돌려주도록 고쳐야 합니다.")
         else:
-            print(f"  dc_{name.lower():4s}: {len(df):>7,} 행 x {len(df.columns)} 컬럼"
+            print(f"  {name.lower()}_dc  : {len(df):>7,} 행 x {len(df.columns)} 컬럼"
                   + ("   << 비어 있음!" if df.empty else ""))
     for name, df in product_trend.items():
         if not isinstance(df, pd.DataFrame):
@@ -122,10 +122,10 @@ def check_columns(product_dc, product_trend):
         if not isinstance(df, pd.DataFrame):
             continue
         missing = [c for c in app.DC_REQUIRED if c not in df.columns]
-        print(f"  dc_{name.lower()}: " + ("전부 있음" if not missing else f"!! 없음 -> {missing}"))
+        print(f"  {name.lower()}_dc: " + ("전부 있음" if not missing else f"!! 없음 -> {missing}"))
         if missing:
             print(f"     실제 컬럼: {list(df.columns)}")
-            note(1, f"dc_{name.lower()} 에 필수 컬럼이 없음",
+            note(1, f"{name.lower()}_dc 에 필수 컬럼이 없음",
                  f"없는 컬럼: {missing}",
                  "이 상태면 대시보드가 아예 에러 화면을 띄우고 멈춥니다.")
     for name, df in product_trend.items():
@@ -141,9 +141,9 @@ def check_columns(product_dc, product_trend):
     # 다만 없으면 hold 필터가 예전처럼 owner/code 만 보고 판단한다.
     for name, df in product_dc.items():
         if isinstance(df, pd.DataFrame) and "status" not in df.columns:
-            print(f"  dc_{name.lower()}: (참고) status 컬럼이 없습니다 "
+            print(f"  {name.lower()}_dc: (참고) status 컬럼이 없습니다 "
                   "-> hold 판정에 status 조건이 빠집니다")
-            note(3, f"dc_{name.lower()} 에 status 컬럼이 없음",
+            note(3, f"{name.lower()}_dc 에 status 컬럼이 없음",
                  "owner/comment 가 다음날 아침에 적재되는 문제를 status 로 막고 있는데,",
                  "이 제품은 그 조건이 빠진 채로 동작합니다.")
 
@@ -152,18 +152,18 @@ def check_spec(product_spec, product_trend):
     """관리선 개정 이력. 없으면 그 item 은 회색으로만 그려진다."""
     for name, df in product_spec.items():
         if not isinstance(df, pd.DataFrame):
-            print(f"  spec_{name.lower():4s}: !! DataFrame 이 아님 ({type(df).__name__})")
-            note(1, f"spec_{name.lower()} 가 DataFrame 이 아님")
+            print(f"  {name.lower()}_spec: !! DataFrame 이 아님 ({type(df).__name__})")
+            note(1, f"{name.lower()}_spec 가 DataFrame 이 아님")
             continue
         missing = [c for c in app.SPEC_REQUIRED if c not in df.columns]
-        line = f"  spec_{name.lower():4s}: {len(df):>7,} 행"
+        line = f"  {name.lower()}_spec: {len(df):>7,} 행"
         if missing:
             print(line + f"   !! 컬럼 없음 -> {missing}")
-            note(1, f"spec_{name.lower()} 에 필수 컬럼이 없음", f"없는 컬럼: {missing}")
+            note(1, f"{name.lower()}_spec 에 필수 컬럼이 없음", f"없는 컬럼: {missing}")
             continue
         if df.empty:
             print(line + "   << 비어 있음!")
-            note(2, f"spec_{name.lower()} 가 비어 있음",
+            note(2, f"{name.lower()}_spec 가 비어 있음",
                  "CL OUT / SL OUT 판정이 안 되고 전부 회색으로 그려집니다.")
             continue
         # 개정이 여러 번인 item 이 있으면 그 차트에 계단이 생긴다
@@ -532,16 +532,16 @@ def main():
     if not isinstance(frames, (tuple, list)) or len(frames) != 9:
         n = len(frames) if hasattr(frames, "__len__") else "?"
         print(f"!! 9개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
-        print("   순서: dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,")
-        print("         spec_uly, spec_sol, spec_tts")
+        print("   순서: uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,")
+        print("         uly_spec, sol_spec, tts_spec")
         print("   spec_* 는 (item_id, from_time, ucl, lcl, usl, lsl) 개정 이력입니다.")
         return
 
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = frames
-    product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
+     uly_spec, sol_spec, tts_spec) = frames
+    product_dc = {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
+    product_spec = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
     safe("1단계", check_shapes, product_dc, product_trend)
     safe("1단계(spec)", check_spec, product_spec, product_trend)
 

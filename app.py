@@ -712,7 +712,7 @@ def check_data(product_dc: dict, trend_frames: dict,
         dc_df, trend_df = product_dc[product], trend_frames[product]
 
         for label, df, required in (
-            (f"dc_{product.lower()}", dc_df, DC_REQUIRED),
+            (f"{product.lower()}_dc", dc_df, DC_REQUIRED),
             (f"{product.lower()}_trend", trend_df, TREND_REQUIRED),
         ):
             if not isinstance(df, pd.DataFrame):
@@ -733,7 +733,7 @@ def check_data(product_dc: dict, trend_frames: dict,
         # of a column failing means the conversion itself is broken.
         NAT_RATIO_LIMIT = 0.5
         for label, df, col in (
-            (f"dc_{product.lower()}", dc_df, "hold_time"),
+            (f"{product.lower()}_dc", dc_df, "hold_time"),
             (f"{product.lower()}_trend", trend_df, "tkout_time"),
         ):
             if col not in df.columns:
@@ -759,20 +759,20 @@ def check_data(product_dc: dict, trend_frames: dict,
         spec_df = (spec_frames or {}).get(product)
         if not isinstance(spec_df, pd.DataFrame):
             warnings.append(
-                f"spec_{product.lower()}: DataFrame 이 아닙니다 "
+                f"{product.lower()}_spec: DataFrame 이 아닙니다 "
                 f"({type(spec_df).__name__}). 관리선 없이 그려집니다."
             )
         elif spec_df.empty:
-            warnings.append(f"spec_{product.lower()}: 비어 있습니다. 관리선 없이 그려집니다.")
+            warnings.append(f"{product.lower()}_spec: 비어 있습니다. 관리선 없이 그려집니다.")
         else:
             missing = [c for c in SPEC_REQUIRED if c not in spec_df.columns]
             if missing:
-                problems.append(f"spec_{product.lower()}: 컬럼 없음 -> {', '.join(missing)}")
+                problems.append(f"{product.lower()}_spec: 컬럼 없음 -> {', '.join(missing)}")
             else:
                 if not pd.api.types.is_datetime64_any_dtype(spec_df["from_time"]):
                     n_bad = pd.to_datetime(spec_df["from_time"], errors="coerce").isna().sum()
                     warnings.append(
-                        f"spec_{product.lower()}: from_time 이 날짜형이 아닙니다 "
+                        f"{product.lower()}_spec: from_time 이 날짜형이 아닙니다 "
                         f"({spec_df['from_time'].dtype})"
                         + (f", 그 중 {n_bad}개는 날짜로 읽히지도 않습니다" if n_bad else "")
                         + ". pd.to_datetime() 으로 변환하세요 "
@@ -783,7 +783,7 @@ def check_data(product_dc: dict, trend_frames: dict,
                                lambda v: to_float(v) is None and pd.notna(v)).sum())]
                 if bad_lim:
                     warnings.append(
-                        f"spec_{product.lower()}: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
+                        f"{product.lower()}_spec: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
                         f"해당 선은 안 그려집니다. float 로 변환하세요."
                     )
                 # trend 의 item 이 spec 에 있는가
@@ -793,12 +793,12 @@ def check_data(product_dc: dict, trend_frames: dict,
                     miss = [i for i in items if i.strip().lower() not in have]
                     if miss and len(miss) == len(items):
                         problems.append(
-                            f"spec_{product.lower()}: trend 의 item 이 하나도 매칭되지 "
+                            f"{product.lower()}_spec: trend 의 item 이 하나도 매칭되지 "
                             f"않습니다. trend 예시 {items[:4]}, spec 예시 {sorted(have)[:4]}"
                         )
                     elif miss:
                         warnings.append(
-                            f"spec_{product.lower()}: item {miss[:5]} 이(가) 없습니다 "
+                            f"{product.lower()}_spec: item {miss[:5]} 이(가) 없습니다 "
                             f"({len(miss)}/{len(items)}종). 해당 차트는 관리선 없이 회색으로만 그려집니다."
                         )
 
@@ -814,14 +814,14 @@ def check_data(product_dc: dict, trend_frames: dict,
 @st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
 def load_data():
     frames = pull_data()
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = frames
+    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
+     uly_spec, sol_spec, tts_spec) = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
     problems, warnings = check_data(
-        {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
+        {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc},
         {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
-        {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts},
+        {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec},
     )
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
@@ -1101,13 +1101,13 @@ def show_dc_ocap():
     with layout="wide" -- that call can only happen once per app and
     must be the first streamlit command, so it doesn't belong in here.
     """
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts,
+    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
+     uly_spec, sol_spec, tts_spec,
      data_loaded_at, problems, data_warnings) = load_data()
 
     trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    spec_frames = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
-    product_dc = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
+    spec_frames = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
+    product_dc = {"ULY": uly_dc, "TTS": tts_dc, "SOL": sol_dc}
 
     if problems:
         st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -1605,12 +1605,12 @@ def _spec_for_export(spec_df) -> pd.DataFrame:
 
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = pull_data()
+    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
+     uly_spec, sol_spec, tts_spec) = pull_data()
 
-    product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
+    product_dc = {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
+    product_spec = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
