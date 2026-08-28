@@ -128,6 +128,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     end_dt = datetime(2026, 8, 12, 23, 59, 59)
     span_seconds = int((end_dt - start_dt).total_seconds())
 
+
     rows = []
     for lot, wafer_id in base_wafers:
         tkout_time = start_dt + timedelta(seconds=int(rng.integers(0, span_seconds)))
@@ -164,6 +165,56 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("tkout_time").reset_index(drop=True)
 
 
+# 규격이 한 번 상향된 날. 이 앞뒤로 값이 달라져야 차트에 계단이 생긴다.
+SPEC_CHANGE = datetime(2026, 8, 1)
+
+
+def generate_spec_for_product(product: str, trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Mock spec table: one row per (root_lot_id, wafer_id, item_id).
+
+    Limits are the spec that applied to that wafer's measurement, not a
+    fixed property of the item -- a revision (say USL 80 -> 85 from Aug 1)
+    means wafers measured on either side carry different numbers, and the
+    chart draws the step rather than one flat line.
+    """
+    cfg = PRODUCT_CONFIG[product]
+    rng = np.random.default_rng(cfg["seed"] + 7)
+    item_cols = item_columns(trend_df)
+
+    base_spec = {}
+    for item in item_cols:
+        spread, center = cfg["spread"], cfg["center"]
+        before = {
+            "usl": round(center + rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "lsl": round(center - rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "ucl": round(center + rng.uniform(spread * 0.6, spread * 1.2), 3),
+            "lcl": round(center - rng.uniform(spread * 0.6, spread * 1.2), 3),
+        }
+        # 일부 item 만 바뀐다: 전부 바뀌면 '안 바뀐 경우' 를, 아무것도 안
+        # 바뀌면 계단 자체를 시험하지 못한다
+        if rng.random() < 0.4:
+            bump = round(rng.uniform(spread * 0.3, spread * 0.8), 3)
+            after = {**before, "usl": round(before["usl"] + bump, 3),
+                     "ucl": round(before["ucl"] + bump, 3)}
+        else:
+            after = before
+        base_spec[item] = (before, after)
+
+    # 한 wafer 의 여러 측정(rw_cnt)은 같은 규격을 쓴다고 본다 -- 키에
+    # 시점이 없으므로 그 wafer 의 첫 측정 시점 기준으로 정한다
+    first_seen = (trend_df.groupby(["root_lot_id", "wafer_id"], observed=True)["tkout_time"]
+                  .min().reset_index())
+    rows = []
+    for _, r in first_seen.iterrows():
+        which = 1 if r["tkout_time"] >= SPEC_CHANGE else 0
+        for item in item_cols:
+            spec = base_spec[item][which]
+            rows.append({"root_lot_id": r["root_lot_id"], "wafer_id": r["wafer_id"],
+                         "item_id": item, **spec})
+    return pd.DataFrame(rows)[
+        ["root_lot_id", "wafer_id", "item_id", "ucl", "lcl", "usl", "lsl"]]
+
+
 def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 50, seed: int | None = None) -> pd.DataFrame:
     """Generate a mock hold-event dataframe for a single product.
 
@@ -181,23 +232,10 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     rng = np.random.default_rng(seed)
     cfg = PRODUCT_CONFIG[product]
     base_rows = trend_df[trend_df["rw_cnt"] == 0]
-    item_cols = [c for c in trend_df.columns if c.startswith("item")]
+    # item_columns(): item1 은 고르고 item1_usl 은 거른다. startswith("item")
+    # 으로 잡으면 관리선 컬럼이 hold 대상 item 으로 섞여 들어간다
+    item_cols = item_columns(trend_df)
 
-    # Limits belong to the item, not to the hold: the measured value differs
-    # every time but USL/LSL/UCL/LCL are the item's spec, so every hold of
-    # the same item_id must repeat the same four numbers. Drawn once here
-    # rather than per hold, or the WAC page would find several conflicting
-    # sets for one item and have to guess which is current.
-    item_limits = {}
-    for item_id in item_cols:
-        spread = cfg["spread"]
-        base = rng.normal(loc=cfg["center"], scale=spread)
-        item_limits[item_id] = {
-            "usl": round(base + rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "lsl": round(base - rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "ucl": round(base + rng.uniform(spread * 0.6, spread * 1.2), 3),
-            "lcl": round(base - rng.uniform(spread * 0.6, spread * 1.2), 3),
-        }
 
     rows = []
     events = []  # (lot_id, src_lot, hold_time) already emitted, for reworks
@@ -244,7 +282,6 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             status = rng.choice(["Active", "Run", "Hold"], p=[0.6, 0.3, 0.1])
 
         for item_id in items:
-            lim = item_limits[item_id]
             hold_inform = rng.choice(HOLD_REASONS)
             step_seq = int(rng.integers(10, 500))
             line_id = rng.choice(LINE_IDS)
@@ -259,10 +296,6 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
                         "hold_time": hold_time,
                         "item_id": item_id,
                         "hold_inform": hold_inform,
-                        "ucl": lim["ucl"],
-                        "lcl": lim["lcl"],
-                        "usl": lim["usl"],
-                        "lsl": lim["lsl"],
                         "step_seq": step_seq,
                         "line_id": line_id,
                         "process_id": cfg["process_id"],
@@ -296,10 +329,6 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             "hold_time",
             "item_id",
             "hold_inform",
-            "ucl",
-            "lcl",
-            "usl",
-            "lsl",
             "step_seq",
             "line_id",
             "process_id",
@@ -328,7 +357,13 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
 
 
 def pull_data():
-    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend).
+    """Return dc x3, trend x3, spec x3 (ULY, SOL, TTS in that order).
+
+    spec_* carries the control limits: one row per
+    (root_lot_id, wafer_id, item_id) with ucl / lcl / usl / lsl. They live
+    here rather than in dc because the spec in force changes over time, so
+    a wafer measured in July and one measured in August are judged against
+    different numbers -- and the chart draws that as a step.
 
     Put the real company-system pull in here. It must be a function, not
     bare module-level code: Streamlit re-runs this file top to bottom on
@@ -343,7 +378,13 @@ def pull_data():
     dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
     dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
-    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend
+    spec_uly = generate_spec_for_product("ULY", uly_trend)
+    spec_sol = generate_spec_for_product("SOL", sol_trend)
+    spec_tts = generate_spec_for_product("TTS", tts_trend)
+
+    return (dc_uly, dc_sol, dc_tts,
+            uly_trend, sol_trend, tts_trend,
+            spec_uly, spec_sol, spec_tts)
 
 
 # ======================================================================
@@ -376,7 +417,7 @@ KEY_PREFIX = "dc_ocap_"
 # surface as a KeyError deep in a callback
 DC_REQUIRED = [
     "lot_id", "root_lot_id", "wafer_id", "rw_cnt", "hold_time", "item_id",
-    "hold_inform", "ucl", "lcl", "usl", "lsl", "line_id", "process_id",
+    "hold_inform", "line_id", "process_id",
     # merged in from the company system, where the disposition is recorded
     "owner", "code", "comment",
 ]
@@ -394,6 +435,39 @@ GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform"
 # 스킴을 붙여야 한다 -- href="go/dcocap" 은 현재 페이지 기준 상대경로로
 # 해석되어 포털 안쪽 주소로 새고, 주소창에 칠 때처럼 호스트로 풀리지 않는다.
 DC_HOLD_URL = "https://go/dcocap"
+
+
+# Limits live in trend next to the measurement, as item1_ucl / item1_usl /
+# ... beside item1, because the spec in force changes over time and each row
+# has to carry the one that applied when that wafer came out of test.
+LIMIT_COLS = ("ucl", "lcl", "usl", "lsl")
+SPEC_REQUIRED = ["root_lot_id", "wafer_id", "item_id", *LIMIT_COLS]
+# trend's own columns, everything else is either an item or one of its limits
+META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time",
+                   "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
+
+
+def item_columns(trend_df) -> list:
+    """The measurement columns of a trend frame (everything but its metadata)."""
+    return [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
+
+
+def spec_lookup(spec_df) -> dict:
+    """(root_lot_id, wafer_id, item_id) -> the four limits, normalized.
+
+    Keys go through norm_lot / norm_wafer for the same reason the trend
+    join does: the spec table and the trend table need not agree on padding
+    or on whether the wafer number is text or an int.
+    """
+    if spec_df is None or not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
+        return {}
+    out = {}
+    cols = [c for c in LIMIT_COLS if c in spec_df.columns]
+    for r in spec_df.itertuples(index=False):
+        key = (norm_lot(r.root_lot_id), norm_wafer(r.wafer_id),
+               str(r.item_id).strip().lower())
+        out[key] = {c: to_float(getattr(r, c)) for c in cols}
+    return out
 
 
 def sort_wafers(values) -> list:
@@ -602,7 +676,8 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[str]]:
+def check_data(product_dc: dict, trend_frames: dict,
+               spec_frames: dict | None = None) -> tuple[list[str], list[str]]:
     """Return (fatal, warnings) about what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
@@ -668,18 +743,49 @@ def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[st
         # if one of these came back as text (e.g. a BigQuery NUMERIC that
         # round-tripped as str/Decimal). Cheap to check in full -- only 4
         # columns, unlike the per-item trend checks below.
-        for limit_col in ("ucl", "lcl", "usl", "lsl"):
-            if limit_col not in dc_df.columns or dc_df.empty:
-                continue
-            bad_count = dc_df[limit_col].map(lambda v: to_float(v) is None and pd.notna(v)).sum()
-            if bad_count:
-                # build_scatter 가 to_float 로 한 번 더 거르므로 그리다 죽지는
-                # 않고, 해당 행의 관리선만 안 그려진다 -> 경고로 충분
-                warnings.append(
-                    f"dc_{product.lower()}: {limit_col} 의 {bad_count}개 값이 숫자로 "
-                    f"변환되지 않습니다 (dtype={dc_df[limit_col].dtype}). "
-                    f"해당 hold 는 관리선이 안 그려집니다. float 로 변환하세요."
-                )
+        # 관리선은 spec 프레임에 (root_lot_id, wafer_id, item_id) 로 있다.
+        # 없거나 안 맞아도 그 점이 회색으로 그려질 뿐이라 경고로 충분하다.
+        spec_df = spec_frames.get(product) if spec_frames else None
+        if not isinstance(spec_df, pd.DataFrame):
+            warnings.append(
+                f"spec_{product.lower()}: DataFrame 이 아닙니다 "
+                f"({type(spec_df).__name__}). 관리선 없이 그려집니다."
+            )
+        elif spec_df.empty:
+            warnings.append(f"spec_{product.lower()}: 비어 있습니다. 관리선 없이 그려집니다.")
+        else:
+            missing = [c for c in SPEC_REQUIRED if c not in spec_df.columns]
+            if missing:
+                problems.append(f"spec_{product.lower()}: 컬럼 없음 -> {', '.join(missing)}")
+            else:
+                bad_lim = [f"{c}({n}개)" for c in LIMIT_COLS
+                           if (n := spec_df[c].map(
+                               lambda v: to_float(v) is None and pd.notna(v)).sum())]
+                if bad_lim:
+                    warnings.append(
+                        f"spec_{product.lower()}: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
+                        f"해당 선은 안 그려집니다. float 로 변환하세요."
+                    )
+                # trend 의 (lot, wafer, item) 이 spec 에 있는가
+                if not trend_df.empty:
+                    have = spec_lookup(spec_df)
+                    want, miss = 0, 0
+                    for item_col in item_columns(trend_df):
+                        k = str(item_col).strip().lower()
+                        for l, w in zip(trend_df["root_lot_id"], trend_df["wafer_id"]):
+                            want += 1
+                            if (norm_lot(l), norm_wafer(w), k) not in have:
+                                miss += 1
+                    if miss == want:
+                        problems.append(
+                            f"spec_{product.lower()}: trend 의 "
+                            f"(root_lot_id, wafer_id, item_id) 가 하나도 매칭되지 않습니다."
+                        )
+                    elif miss:
+                        warnings.append(
+                            f"spec_{product.lower()}: {miss:,}/{want:,} 개 측정에 관리선이 "
+                            f"없습니다 (해당 점은 회색으로만 그려짐)."
+                        )
 
         # dc.item_id must name a real column in that product's trend
         # (case-insensitively -- resolve_item_col handles the difference)
@@ -740,12 +846,14 @@ def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[st
 @st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
 def load_data():
     frames = pull_data()
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
+    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts) = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
     problems, warnings = check_data(
         {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
         {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
+        {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts},
     )
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
@@ -810,8 +918,45 @@ def find_trend_df(trend_frames: dict, product: str, item_id: str):
     return tdf, item_col
 
 
+LIMIT_LINE_STYLE = {
+    "ucl": ("blue", "UCL"), "lcl": ("blue", "LCL"),
+    "usl": ("red", "USL"),  "lsl": ("red", "LSL"),
+}
+
+
+def add_limit_steps(fig, times, lim: dict) -> None:
+    """Draw each limit as a step line rather than one flat rule.
+
+    A spec revision (USL 80 up to Aug 1, 85 after) has to read as a step at
+    the date it took effect -- drawing a single hline would put every point
+    on one side of a limit that was never in force for half of them. The
+    value is taken from the rows themselves, so the line follows whatever
+    the data says, however many times it changed.
+    """
+    order = np.argsort(times.values)
+    x = times.values[order]
+    for which, series in lim.items():
+        y = series.values[order]
+        if not np.isfinite(y).any():
+            continue
+        color, label = LIMIT_LINE_STYLE[which]
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines", name=label,
+            # hv: hold the old value until the moment it changes, then step
+            line=dict(color=color, dash="dash", width=1, shape="hv"),
+            hoverinfo="skip", showlegend=False,
+        ))
+        first = next((v for v in y if np.isfinite(v)), None)
+        if first is not None:
+            fig.add_annotation(
+                xref="paper", x=0, xanchor="left", y=first, yref="y", text=label,
+                showarrow=False, font=dict(color=color, size=11),
+                yanchor="bottom" if which in ("ucl", "usl") else "top",
+            )
+
+
 def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
-                   legend_field: str | None, ucl, lcl, usl, lsl,
+                   legend_field: str | None, spec: dict,
                    chart_height: int, focus_pair: tuple | None = None) -> go.Figure:
     """Scatter one measurement item over time.
 
@@ -826,8 +971,6 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     its own legend entry, so the selection stays visible regardless of
     which color group the point itself belongs to.
     """
-    ucl, lcl, usl, lsl = to_float(ucl), to_float(lcl), to_float(usl), to_float(lsl)
-
     # coerce before dropna: a numeric column that came back as text/object
     # (BigQuery NUMERIC/DECIMAL) would otherwise keep its non-null string
     # values and only fail once plotly tries to lay out the chart
@@ -836,6 +979,17 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # keep tkout_time itself as a real datetime (needed for the x-axis);
     # format a separate string column just for the hover box
     plot_df["_hover_time"] = plot_df["tkout_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    # limits come from the row, not from one number for the whole chart: the
+    # spec in force changes over time, so each point is judged against the
+    # one that applied when it was measured
+    item_key = str(item_id).strip().lower()
+    keys = [(norm_lot(l), norm_wafer(w), item_key)
+            for l, w in zip(plot_df["root_lot_id"], plot_df["wafer_id"])]
+    lim = {
+        which: pd.Series([(spec.get(k) or {}).get(which) for k in keys],
+                         index=plot_df.index, dtype="float64")
+        for which in LIMIT_COLS
+    }
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
@@ -847,16 +1001,9 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # a point past the scrap limit is necessarily past the control limit
     # too, so scrap wins and the two groups stay disjoint
     values = plot_df[item_id]
-    past_scrap = pd.Series(False, index=plot_df.index)
-    if usl is not None:
-        past_scrap |= values > usl
-    if lsl is not None:
-        past_scrap |= values < lsl
-    past_control = pd.Series(False, index=plot_df.index)
-    if ucl is not None:
-        past_control |= values > ucl
-    if lcl is not None:
-        past_control |= values < lcl
+    past_scrap = (values > lim["usl"]).fillna(False) | (values < lim["lsl"]).fillna(False)
+    past_control = ((values > lim["ucl"]).fillna(False)
+                    | (values < lim["lcl"]).fillna(False))
     past_control &= ~past_scrap
 
     bad = plot_df[is_bad_row]
@@ -948,14 +1095,7 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
 
     # skip any limit that didn't parse to a number rather than passing None
     # through to plotly, which errors on a missing y just as it does on a str
-    if ucl is not None:
-        fig.add_hline(y=ucl, line=dict(color="blue", dash="dash"), annotation_text="UCL", annotation_position="top left")
-    if lcl is not None:
-        fig.add_hline(y=lcl, line=dict(color="blue", dash="dash"), annotation_text="LCL", annotation_position="bottom left")
-    if usl is not None:
-        fig.add_hline(y=usl, line=dict(color="red", dash="dash"), annotation_text="USL", annotation_position="top left")
-    if lsl is not None:
-        fig.add_hline(y=lsl, line=dict(color="red", dash="dash"), annotation_text="LSL", annotation_position="bottom left")
+    add_limit_steps(fig, plot_df["tkout_time"], lim)
 
     fig.update_layout(
         xaxis_title="tkout_time",
@@ -991,10 +1131,15 @@ def show_dc_ocap():
     must be the first streamlit command, so it doesn't belong in here.
     """
     (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts,
      data_loaded_at, problems, data_warnings) = load_data()
 
     trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
     product_dc = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
+    # (root_lot_id, wafer_id, item_id) -> 관리선. 차트마다 새로 만들면
+    # 클릭할 때마다 spec 전체를 다시 훑게 되므로 여기서 한 번만 만든다
+    spec_lookups = {p: spec_lookup(d) for p, d in
+                    (("ULY", spec_uly), ("SOL", spec_sol), ("TTS", spec_tts))}
 
     if problems:
         st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -1287,14 +1432,13 @@ def show_dc_ocap():
                     bad_pairs = set(zip(item_rows["root_lot_id"].map(norm_lot),
                                         item_rows["wafer_id"].map(norm_wafer)))
                     wafer_list = ",".join(str(w) for w in sort_wafers(item_rows["wafer_id"]))
-                    limits = item_rows.iloc[0]
 
                     if tdf[item_col].notna().sum() == 0:
                         st.warning(f"{item_id} 은(는) 이 제품 trend 에 측정값이 없습니다.")
 
                     fig = build_scatter(
                         tdf, item_col, bad_pairs, str(lot_id), legend_field,
-                        limits["ucl"], limits["lcl"], limits["usl"], limits["lsl"],
+                        spec_lookups.get(product, {}),
                         chart_height=TREND_HEIGHT - 150, focus_pair=chart_focus_pair,
                     )
                     fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
@@ -1449,9 +1593,6 @@ HERE = Path(__file__).parent if "__file__" in globals() else Path.cwd()
 TEMPLATE_PATH = HERE / "dc_ocap_template.html"
 OUTPUT_PATH = HERE / "dc_ocap.html"
 
-# kept in sync with dc_ocap_template.html's META_TREND_COLS -- everything
-# else in a trend row is an item measurement column
-META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
 
 
 def _clean(value):
@@ -1487,17 +1628,19 @@ def _columns(df: pd.DataFrame) -> dict:
 
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = pull_data()
+    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts) = pull_data()
 
     product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
     # a broken dc_ocap.html. Warnings are printed but must not stop the
     # build: this runs hourly and uploads to S3, so failing over a few
     # wafers missing from trend would freeze the portal on a stale report.
-    problems, warnings = check_data(product_dc, product_trend)
+    problems, warnings = check_data(product_dc, product_trend, product_spec)
     if problems:
         raise SystemExit(
             "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
@@ -1510,9 +1653,14 @@ def build_dc_ocap_html() -> Path:
         "dc": {p: _columns(product_dc[p]) for p in product_dc},
         "trend": {p: _columns(product_trend[p]) for p in product_trend},
         "itemCols": {
-            p: [c for c in product_trend[p].columns if c not in META_TREND_COLS]
+            p: item_columns(product_trend[p])
             for p in product_trend
         },
+        # 관리선. 브라우저에서 (lot||wafer||item) 키로 조회한다
+        "spec": {p: _columns(product_spec[p][SPEC_REQUIRED])
+                 if isinstance(product_spec[p], pd.DataFrame)
+                 and not product_spec[p].empty else {}
+                 for p in product_spec},
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")

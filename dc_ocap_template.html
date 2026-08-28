@@ -263,10 +263,38 @@ async function loadData() {
   const parsed = JSON.parse(await new Response(stream).text());
   for (const p of Object.keys(parsed.dc)) parsed.dc[p] = expandColumnar(parsed.dc[p]);
   for (const p of Object.keys(parsed.trend)) parsed.trend[p] = expandColumnar(parsed.trend[p]);
+  for (const p of Object.keys(parsed.spec || {})) parsed.spec[p] = expandColumnar(parsed.spec[p]);
   return parsed;
 }
 
 const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
+// 관리선은 DATA.spec 에 (root_lot_id, wafer_id, item_id) 로 들어 있다.
+// 적용 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 점마다
+// 그 wafer 에 적용된 값을 찾아 쓴다. (app.py 의 spec_lookup 과 동일)
+const LIMIT_COLS = ["ucl","lcl","usl","lsl"];
+const LIMIT_LINE_STYLE = { ucl:["blue","UCL"], lcl:["blue","LCL"],
+                           usl:["red","USL"],  lsl:["red","LSL"] };
+const EMPTY_LIMITS = { ucl:null, lcl:null, usl:null, lsl:null };
+
+const _specMaps = {};
+function specMap(product) {
+  if (_specMaps[product]) return _specMaps[product];
+  const m = new Map();
+  for (const r of (DATA.spec && DATA.spec[product]) || []) {
+    const key = normLot(r.root_lot_id) + "||" + normWafer(r.wafer_id)
+              + "||" + String(r.item_id).trim().toLowerCase();
+    const o = {};
+    for (const w of LIMIT_COLS) o[w] = toFloat(r[w]);
+    m.set(key, o);
+  }
+  _specMaps[product] = m;
+  return m;
+}
+function rowLimits(product, r, itemCol) {
+  const key = normLot(r.root_lot_id) + "||" + normWafer(r.wafer_id)
+            + "||" + String(itemCol).trim().toLowerCase();
+  return specMap(product).get(key) || EMPTY_LIMITS;
+}
 const LEGEND_FIELD_OPTIONS = {
   "없음 (기본)": null,
   "probe_card_id": "probe_card_id",
@@ -486,9 +514,35 @@ function el(tag, props = {}, children = []) {
 }
 
 // ---- chart building (port of build_scatter) ----
-function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, ucl, lcl, usl, lsl, focusPair) {
-  ucl = toFloat(ucl); lcl = toFloat(lcl); usl = toFloat(usl); lsl = toFloat(lsl);
+// 관리선을 평평한 한 줄이 아니라 계단으로 그린다. 규격이 8/1 에 80 -> 85
+// 로 바뀌었다면 그 시점에 선이 꺾여야 하고, 한 줄로 그으면 절반의 점은
+// 자기에게 적용된 적 없는 선을 기준으로 보이게 된다. shape:"hv" 는 값이
+// 바뀌는 순간까지 이전 값을 유지하다가 수직으로 꺾는다.
+function addLimitSteps(traces, annotations, rows) {
+  if (!rows.length) return;
+  // DC OCAP 쪽 행은 tkout_time 을, WAC 쪽 행은 미리 뽑아둔 _x 를 쓴다
+  const xOf = (r) => (r._x !== undefined ? r._x : r.tkout_time);
+  const sorted = rows.slice().sort((a, b) => (xOf(a) < xOf(b) ? -1 : 1));
+  const x = sorted.map(xOf);
+  for (const which of LIMIT_COLS) {
+    const y = sorted.map(r => r._lim[which]);
+    if (!y.some(v => v !== null && Number.isFinite(v))) continue;
+    const [color, label] = LIMIT_LINE_STYLE[which];
+    traces.push({
+      type: "scatter", x, y, mode: "lines", name: label,
+      line: { color, dash: "dash", width: 1, shape: "hv" },
+      hoverinfo: "skip", showlegend: false,
+    });
+    const first = y.find(v => v !== null && Number.isFinite(v));
+    if (first !== undefined) annotations.push({
+      xref: "paper", x: 0, xanchor: "left", yref: "y", y: first, text: label,
+      showarrow: false, font: { color, size: 10 },
+      yanchor: (which === "ucl" || which === "usl") ? "bottom" : "top",
+    });
+  }
+}
 
+function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, focusPair) {
   const trend = DATA.trend[product];
   const rows = [];
   for (const r of trend) {
@@ -496,13 +550,18 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, u
     if (raw === null || raw === undefined) continue;
     const val = Number(raw);
     if (!Number.isFinite(val)) continue;
-    rows.push({ ...r, _val: val, _hoverTime: formatHoverTime(r.tkout_time) });
+    // 이 점이 측정될 때 유효했던 관리선을 같이 들고 다닌다
+    rows.push({ ...r, _val: val, _lim: rowLimits(product, r, itemCol),
+                _hoverTime: formatHoverTime(r.tkout_time) });
   }
 
   const badLots = new Set([...badPairs].map(p => p.split("||")[0]));
   const isBad = (r) => badPairs.has(pairKey(r.root_lot_id, r.wafer_id));
-  const pastScrap = (r) => (usl !== null && r._val > usl) || (lsl !== null && r._val < lsl);
-  const pastControl = (r) => !pastScrap(r) && ((ucl !== null && r._val > ucl) || (lcl !== null && r._val < lcl));
+  const pastScrap = (r) => (r._lim.usl !== null && r._val > r._lim.usl)
+                        || (r._lim.lsl !== null && r._val < r._lim.lsl);
+  const pastControl = (r) => !pastScrap(r)
+                        && ((r._lim.ucl !== null && r._val > r._lim.ucl)
+                         || (r._lim.lcl !== null && r._val < r._lim.lcl));
 
   const bad = rows.filter(r => isBad(r));
   // exact-zero readings are almost always measurement glitches, not real
@@ -577,25 +636,14 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, u
     }
   }
 
-  const shapes = [];
   const annotations = [];
-  function addHline(y, color, text, atTop) {
-    shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y, line: { color, dash: "dash" } });
-    annotations.push({
-      xref: "paper", x: 0, xanchor: "left", yref: "y", y, text,
-      showarrow: false, font: { color, size: 11 }, yanchor: atTop ? "bottom" : "top",
-    });
-  }
-  if (ucl !== null) addHline(ucl, "blue", "UCL", true);
-  if (lcl !== null) addHline(lcl, "blue", "LCL", false);
-  if (usl !== null) addHline(usl, "red", "USL", true);
-  if (lsl !== null) addHline(lsl, "red", "LSL", false);
+  addLimitSteps(traces, annotations, rows);
 
   const layout = {
     xaxis: { title: { text: "tkout_time" } },
     yaxis: { title: { text: itemCol } },
     legend: { title: { text: legendField || "Legend" }, font: { size: 10 }, itemsizing: "constant", tracegroupgap: 0 },
-    shapes, annotations,
+    shapes: [], annotations,
     margin: { t: 30, b: 30, l: 55, r: 20 },
     height: 284,
   };
@@ -866,11 +914,9 @@ function renderTrendAndComment(dcAll, dcFiltered) {
     const itemRows = lotRows.filter(r => r.item_id === itemId);
     const badPairs = new Set(itemRows.map(r => pairKey(r.root_lot_id, r.wafer_id)));
     const waferList = sortWafers(itemRows.map(r => r.wafer_id)).join(",");
-    const limits = itemRows[0] || {};
 
     const { traces, layout, measuredCount } = buildScatterTraces(
-      state.product, itemCol, badPairs, String(lotId), state.legendField,
-      limits.ucl, limits.lcl, limits.usl, limits.lsl, chartFocusPair
+      state.product, itemCol, badPairs, String(lotId), state.legendField, chartFocusPair
     );
     if (measuredCount === 0) {
       warningBox.appendChild(el("div", { class: "warning-box", text: `${itemId} 은(는) 이 제품 trend 에 측정값이 없습니다.` }));
@@ -927,22 +973,6 @@ function renderTrendAndComment(dcAll, dcFiltered) {
 // WAC Trend 페이지
 // ====================================================================
 
-// 관리선은 trend 에 없고 dc 에만 있다. 규격은 item 의 성질이라 같은
-// item_id 면 hold 가 달라도 같은 값이므로, 처음 만나는 행 하나면 충분하다.
-// dc 에 한 번도 안 걸린 item 은 관리선을 알 수 없으므로 null.
-const _wacLimitCache = new Map();
-function wacLimits(product, itemId) {
-  const key = product + "||" + itemId;
-  if (_wacLimitCache.has(key)) return _wacLimitCache.get(key);
-  const want = String(itemId).trim().toLowerCase();
-  const hit = DATA.dc[product].find(
-    r => String(r.item_id).trim().toLowerCase() === want);
-  const lim = hit ? { ucl: toFloat(hit.ucl), lcl: toFloat(hit.lcl),
-                      usl: toFloat(hit.usl), lsl: toFloat(hit.lsl) } : null;
-  _wacLimitCache.set(key, lim);
-  return lim;
-}
-
 // 측정값이 있는 행만 한 번 추려두고 재사용한다. 클릭할 때마다 다시 훑으면
 // item 20여 개 x 수천 행을 매번 되풀이하게 된다.
 const _wacRowCache = new Map();
@@ -958,7 +988,7 @@ function wacRows(product, itemCol) {
     // 좌표/hover 를 여기서 한 번만 만들어 둔다. 타점을 누를 때마다 차트를
     // 전부 다시 그리는데, 그때마다 수만 행을 다시 훑으면 클릭이 느려진다
     out.push({ root_lot_id: r.root_lot_id, wafer_id: r.wafer_id,
-               _x: r.tkout_time, _val: val,
+               _x: r.tkout_time, _val: val, _lim: rowLimits(product, r, itemCol),
                _cd: [r.root_lot_id, r.wafer_id, formatHoverTime(r.tkout_time),
                      r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt],
                _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id) });
@@ -981,17 +1011,17 @@ const WAC_MAX_GRAY = 2500;
 // (트레이스를 다시 만들면 차트 20여 개를 통째로 다시 그려야 해서 느리다)
 const WAC_TREND = 0, WAC_CL = 1, WAC_SL = 2;
 
-function wacGroups(product, itemCol, lim) {
+function wacGroups(product, itemCol) {
   const rows = wacRows(product, itemCol);
-  const ucl = lim ? lim.ucl : null, lcl = lim ? lim.lcl : null;
-  const usl = lim ? lim.usl : null, lsl = lim ? lim.lsl : null;
   const g = [[], [], []];
   const byLot = new Map();
   for (const r of rows) {
-    const v = r._val;
+    // 각 점은 '그때 유효했던' 관리선으로 판정한다. 규격이 중간에 바뀌면
+    // 같은 값이라도 시점에 따라 OUT 여부가 달라진다
+    const v = r._val, L = r._lim;
     let i;
-    if ((usl !== null && v > usl) || (lsl !== null && v < lsl)) i = WAC_SL;
-    else if ((ucl !== null && v > ucl) || (lcl !== null && v < lcl)) i = WAC_CL;
+    if ((L.usl !== null && v > L.usl) || (L.lsl !== null && v < L.lsl)) i = WAC_SL;
+    else if ((L.ucl !== null && v > L.ucl) || (L.lcl !== null && v < L.lcl)) i = WAC_CL;
     else i = WAC_TREND;
     // 자기 색을 행에 심어둔다 -- 덧그릴 때 그룹을 다시 판정하지 않아도 된다
     r._c = i === WAC_TREND ? WAC_GRAY : (i === WAC_CL ? LIMIT_COLORS.control : LIMIT_COLORS.scrap);
@@ -1037,25 +1067,12 @@ function wacOverlays(entry, sel) {
   return [lot, hit];
 }
 
-function wacLayout(itemCol, lim) {
-  const shapes = [], annotations = [];
-  function hline(y, color, text, atTop) {
-    if (y === null || y === undefined) return;
-    shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y,
-                  line: { color, dash: "dash" } });
-    annotations.push({ xref: "paper", x: 0, xanchor: "left", yref: "y", y, text,
-                       showarrow: false, font: { color, size: 10 },
-                       yanchor: atTop ? "bottom" : "top" });
-  }
-  if (lim) {
-    hline(lim.ucl, "blue", "UCL", true); hline(lim.lcl, "blue", "LCL", false);
-    hline(lim.usl, "red", "USL", true);  hline(lim.lsl, "red", "LSL", false);
-  }
+function wacLayout(itemCol, annotations) {
   return {
     xaxis: { title: { text: "tkout_time" } },
     yaxis: { title: { text: itemCol } },
     legend: { font: { size: 9 }, itemsizing: "constant", tracegroupgap: 0 },
-    shapes, annotations,
+    shapes: [], annotations,
     margin: { t: 24, b: 34, l: 52, r: 12 },
     height: 260,
     uirevision: itemCol,      // 클릭해도 확대/이동 상태는 유지
@@ -1069,11 +1086,11 @@ let wacCharts = [];
 function wacDrawChart(entry) {
   if (entry.drawn) return;
   entry.drawn = true;
-  const { div, itemCol, lim } = entry;
+  const { div, itemCol } = entry;
   // 여기서 처음 계산한다. renderWac 에서 미리 다 해두면 화면에 보이지도
   // 않는 item 수십 개 x 수천 행을 첫 화면 뜨기 전에 훑게 된다
   if (!entry.groups) {
-    const built = wacGroups(state.product, itemCol, lim);
+    const built = wacGroups(state.product, itemCol);
     entry.groups = built.g; entry.byLot = built.byLot;
   }
   const groups = entry.groups;
@@ -1100,7 +1117,10 @@ function wacDrawChart(entry) {
       showlegend: false, hoverinfo: "skip",
     });
   }
-  Plotly.react(div, traces, wacLayout(itemCol, lim),
+  // 관리선 계단은 DC OCAP 차트와 같은 함수로 그린다
+  const annotations = [];
+  addLimitSteps(traces, annotations, wacRows(state.product, itemCol));
+  Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
   div.on("plotly_click", (ev) => {
     const pt = ev.points && ev.points[0];
@@ -1168,15 +1188,19 @@ function renderWac() {
   empty.hidden = true;
 
   items.forEach(itemCol => {
-    const lim = wacLimits(state.product, itemCol);
     const box = el("div", { class: "wac-chart" });
     box.appendChild(el("div", { class: "wac-chart-title", text: itemCol }));
-    if (!lim) box.appendChild(el("div", { class: "wac-nolimit",
-      text: "관리선 없음 (dc 에 hold 이력이 없는 item)" }));
+    // 관리선은 trend 에 item 별 컬럼으로 있다. 하나도 없으면 그 item 은
+    // OUT 판정을 할 수 없으므로 전부 회색으로만 그려진다
+    const rows0 = DATA.trend[state.product];
+    const hasLim = rows0.length > 0 &&
+      rows0.some(r => rowLimits(state.product, r, itemCol) !== EMPTY_LIMITS);
+    if (!hasLim) box.appendChild(el("div", { class: "wac-nolimit",
+      text: "관리선 없음 (spec 에 이 item 이 없습니다)" }));
     const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);
-    wacCharts.push({ div, itemCol, lim, groups: null,
+    wacCharts.push({ div, itemCol, groups: null,
                      drawn: false, visible: false, dirty: false });
   });
 
