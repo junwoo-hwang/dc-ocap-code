@@ -112,10 +112,29 @@
     color: #000; font-size: 1.05rem; background: #f4f5f7; font-family: inherit;
   }
   .disposition { font-size: 0.9em; line-height: 1.7; margin-top: 6px; }
+
+  /* ---- 페이지 전환 (DC OCAP / WAC Trend) ---- */
+  .seg.page-switch { margin-bottom: 14px; }
+  .seg.page-switch button { padding: 0.3rem 1.1rem; font-size: 0.9rem; font-weight: 600; }
+
+  /* ---- WAC Trend 페이지 ---- */
+  .wac-search { margin-bottom: 0; flex: 1; }
+  .wac-stamp { font-size: 0.8rem; color: #888; text-align: right; }
+  /* 가로 2개 고정, 세로로는 item 수만큼 */
+  .wac-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
+  .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
+  .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
+  .wac-chart .wac-nolimit { font-size: 0.75rem; color: #b45309; margin-bottom: 2px; }
 </style>
 </head>
 <body>
 <div id="app">
+  <div class="seg page-switch" id="pageSwitch">
+    <button data-val="dcocap" class="active">DC OCAP</button>
+    <button data-val="wac">WAC Trend</button>
+  </div>
+
+  <div id="pageDcOcap">
   <h1>Hold 현황 <span class="ts counts" id="newHoldCounts"></span></h1>
 
   <div class="layout">
@@ -176,6 +195,32 @@
       <div class="panel" id="trendPanel"></div>
       <div class="panel" id="commentPanel"></div>
     </div>
+  </div>
+  </div><!-- /pageDcOcap -->
+
+  <div id="pageWac" hidden>
+    <h1>WAC Trend <span class="ts counts" id="wacCounts"></span></h1>
+    <div class="layout">
+      <div class="left">
+        <div class="header-row">
+          <div class="list-title">ITEM Trend</div>
+          <input type="text" id="wacSearch" class="search-box wac-search"
+                 placeholder="item_id 검색 (예: item3)">
+        </div>
+        <div class="header-row2">
+          <div class="seg stretch" id="wacProductSwitch">
+            <button data-val="ULY" class="active">ULY</button>
+            <button data-val="TTS">TTS</button>
+            <button data-val="SOL">SOL</button>
+          </div>
+        </div>
+      </div>
+      <div class="right">
+        <div class="wac-stamp">(Latest Data : __GENERATED_AT__)</div>
+      </div>
+    </div>
+    <div id="wacGrid" class="wac-grid"></div>
+    <div id="wacEmpty" class="info-box" hidden></div>
   </div>
 </div>
 
@@ -247,6 +292,9 @@ const CATEGORY_COLORS = [
 const state = {
   product: "ULY",
   statusFilter: "hold",
+  page: "dcocap",          // "dcocap" | "wac"
+  wacSelected: null,       // {rootLotId, waferId} -- 모든 WAC 차트에 동시 적용
+  wacSearch: "",
   selectedLotId: null,
   selectedRwCnt: null,
   itemIdxByKey: {},
@@ -873,7 +921,167 @@ function renderTrendAndComment(dcAll, dcFiltered) {
   commentPanel.appendChild(dispositionDiv);
 }
 
+// ====================================================================
+// WAC Trend 페이지
+// ====================================================================
+
+// 관리선은 trend 에 없고 dc 에만 있다. 같은 item 이라도 hold 마다 값이
+// 달라질 수 있어서, 가장 최근 hold 의 것을 그 item 의 현재 규격으로 본다.
+// dc 에 한 번도 안 걸린 item 은 관리선을 알 수 없으므로 null.
+const _wacLimitCache = new Map();
+function wacLimits(product, itemId) {
+  const key = product + "||" + itemId;
+  if (_wacLimitCache.has(key)) return _wacLimitCache.get(key);
+  const want = String(itemId).trim().toLowerCase();
+  let best = null;
+  for (const r of DATA.dc[product]) {
+    if (String(r.item_id).trim().toLowerCase() !== want) continue;
+    if (!best || (r.hold_time && r.hold_time > best.hold_time)) best = r;
+  }
+  const lim = best ? { ucl: toFloat(best.ucl), lcl: toFloat(best.lcl),
+                       usl: toFloat(best.usl), lsl: toFloat(best.lsl) } : null;
+  _wacLimitCache.set(key, lim);
+  return lim;
+}
+
+// 측정값이 있는 행만 한 번 추려두고 재사용한다. 클릭할 때마다 다시 훑으면
+// item 20여 개 x 수천 행을 매번 되풀이하게 된다.
+const _wacRowCache = new Map();
+function wacRows(product, itemCol) {
+  const key = product + "||" + itemCol;
+  if (_wacRowCache.has(key)) return _wacRowCache.get(key);
+  const out = [];
+  for (const r of DATA.trend[product]) {
+    const raw = r[itemCol];
+    if (raw === null || raw === undefined) continue;
+    const val = Number(raw);
+    if (!Number.isFinite(val)) continue;
+    out.push({ ...r, _val: val, _hoverTime: formatHoverTime(r.tkout_time) });
+  }
+  _wacRowCache.set(key, out);
+  return out;
+}
+
+const WAC_SIZE = 6, WAC_SIZE_SEL = 14;
+
+function buildWacTraces(product, itemCol, lim, sel) {
+  const rows = wacRows(product, itemCol);
+  const ucl = lim ? lim.ucl : null, lcl = lim ? lim.lcl : null;
+  const usl = lim ? lim.usl : null, lsl = lim ? lim.lsl : null;
+  const slOut = r => (usl !== null && r._val > usl) || (lsl !== null && r._val < lsl);
+  const clOut = r => !slOut(r) && ((ucl !== null && r._val > ucl) || (lcl !== null && r._val < lcl));
+
+  const selLot = sel ? normLot(sel.rootLotId) : null;
+  const isSel = r => sel && normLot(r.root_lot_id) === selLot
+                        && normWafer(r.wafer_id) === normWafer(sel.waferId);
+  const sameLot = r => sel && normLot(r.root_lot_id) === selLot && !isSel(r);
+
+  const g = { sl: [], cl: [], same: [], other: [] };
+  for (const r of rows) {
+    if (slOut(r)) g.sl.push(r);
+    else if (clOut(r)) g.cl.push(r);
+    else if (sameLot(r)) g.same.push(r);
+    else g.other.push(r);
+  }
+
+  const traces = [];
+  function add(grp, color, name, rank) {
+    if (!grp.length) return;
+    // 클릭한 타점만 커진다. 색은 그대로라 어느 그룹인지도 계속 보인다
+    const sizes = grp.map(r => isSel(r) ? WAC_SIZE_SEL : WAC_SIZE);
+    traces.push({
+      x: grp.map(r => r.tkout_time), y: grp.map(r => r._val),
+      mode: "markers", name, legendrank: rank,
+      marker: { color, size: sizes },
+      customdata: grp.map(r => [r.root_lot_id, r.wafer_id, r._hoverTime,
+                                r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt]),
+      hovertemplate: HOVER_TEMPLATE,
+    });
+  }
+  add(g.other, "lightgray", "trend", 1100);
+  add(g.same, "dimgray", sel ? normLot(sel.rootLotId) : "same lot", 1050);
+  add(g.cl, LIMIT_COLORS.control, "CL OUT", 20);
+  add(g.sl, LIMIT_COLORS.scrap, "SL OUT", 10);
+
+  const shapes = [], annotations = [];
+  function hline(y, color, text, atTop) {
+    if (y === null) return;
+    shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y,
+                  line: { color, dash: "dash" } });
+    annotations.push({ xref: "paper", x: 0, xanchor: "left", yref: "y", y, text,
+                       showarrow: false, font: { color, size: 10 },
+                       yanchor: atTop ? "bottom" : "top" });
+  }
+  hline(ucl, "blue", "UCL", true); hline(lcl, "blue", "LCL", false);
+  hline(usl, "red", "USL", true);  hline(lsl, "red", "LSL", false);
+
+  return {
+    traces,
+    layout: {
+      xaxis: { title: { text: "tkout_time" } },
+      yaxis: { title: { text: itemCol } },
+      legend: { font: { size: 9 }, itemsizing: "constant", tracegroupgap: 0 },
+      shapes, annotations,
+      margin: { t: 24, b: 34, l: 52, r: 12 },
+      height: 260,
+      uirevision: itemCol,      // 클릭해도 확대/이동 상태는 유지
+    },
+    n: rows.length,
+  };
+}
+
+function renderWac() {
+  document.getElementById("wacCounts").innerHTML =
+    "WAC item 수<br>" + Object.keys(DATA.trend)
+      .map(p => `${p} : ${(DATA.itemCols[p] || []).length}건`).join(", ");
+  document.querySelectorAll("#wacProductSwitch button").forEach(b =>
+    b.classList.toggle("active", b.dataset.val === state.product));
+  const search = document.getElementById("wacSearch");
+  if (search.value !== state.wacSearch) search.value = state.wacSearch;
+
+  const q = state.wacSearch.trim().toLowerCase();
+  const items = (DATA.itemCols[state.product] || [])
+    .filter(c => !q || String(c).toLowerCase().includes(q));
+
+  const grid = document.getElementById("wacGrid");
+  const empty = document.getElementById("wacEmpty");
+  grid.innerHTML = "";
+  if (!items.length) {
+    empty.hidden = false;
+    empty.textContent = q ? `"${state.wacSearch}" 와 맞는 item 이 없습니다.`
+                          : "이 제품의 trend 에 item 컬럼이 없습니다.";
+    return;
+  }
+  empty.hidden = true;
+
+  items.forEach(itemCol => {
+    const lim = wacLimits(state.product, itemCol);
+    const box = el("div", { class: "wac-chart" });
+    box.appendChild(el("div", { class: "wac-chart-title", text: itemCol }));
+    if (!lim) box.appendChild(el("div", { class: "wac-nolimit",
+      text: "관리선 없음 (dc 에 hold 이력이 없는 item)" }));
+    const div = el("div");
+    box.appendChild(div);
+    grid.appendChild(box);
+
+    const { traces, layout } = buildWacTraces(state.product, itemCol, lim, state.wacSelected);
+    Plotly.react(div, traces, layout, { displayModeBar: false, responsive: true });
+    div.on("plotly_click", (ev) => {
+      const pt = ev.points && ev.points[0];
+      if (!pt || !pt.customdata) return;
+      const [root, wafer] = pt.customdata;
+      const cur = state.wacSelected;
+      // 같은 타점을 다시 누르면 선택 해제
+      state.wacSelected = (cur && normLot(cur.rootLotId) === normLot(root)
+                               && normWafer(cur.waferId) === normWafer(wafer))
+        ? null : { rootLotId: root, waferId: wafer };
+      renderWac();     // 모든 차트에 한 번에 반영
+    });
+  });
+}
+
 function renderAll() {
+  if (state.page === "wac") { renderWac(); return; }
   renderFilterButtons();
   const dcAll = DATA.dc[state.product];
   const dcFiltered = filterByStatus(dcAll, state.statusFilter);
@@ -883,6 +1091,28 @@ function renderAll() {
   renderTrendAndComment(dcAll, dcFiltered);
 }
 
+document.getElementById("pageSwitch").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || btn.dataset.val === state.page) return;
+  state.page = btn.dataset.val;
+  document.querySelectorAll("#pageSwitch button").forEach(b =>
+    b.classList.toggle("active", b.dataset.val === state.page));
+  document.getElementById("pageDcOcap").hidden = state.page !== "dcocap";
+  document.getElementById("pageWac").hidden = state.page !== "wac";
+  renderAll();
+});
+document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  // 제품은 두 페이지가 같이 쓴다 -- 여기서 바꾸고 DC OCAP 으로 가도 그대로
+  state.product = btn.dataset.val;
+  state.wacSelected = null;
+  renderWac();
+});
+document.getElementById("wacSearch").addEventListener("input", (e) => {
+  state.wacSearch = e.target.value;
+  renderWac();
+});
 document.getElementById("statusFilter").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
