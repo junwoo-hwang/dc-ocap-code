@@ -267,7 +267,9 @@ async function loadData() {
   return parsed;
 }
 
-const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
+// item 컬럼 목록은 여기서 다시 고르지 않는다 -- app.py 의 item_columns()
+// 가 골라 DATA.itemCols 로 넣어준다. 양쪽에 같은 목록을 두면 한쪽만 고쳤을
+// 때 조용히 갈라진다.
 // 관리선은 DATA.spec 에 (item_id, from_time) 개정 이력으로 들어 있다.
 // 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 점마다 그때
 // 유효했던 개정을 찾아 쓴다. (app.py 의 limits_asof 와 같은 규칙)
