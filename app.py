@@ -1260,14 +1260,24 @@ def show_dc_ocap():
         status_filter = status_filter or "hold"
 
         full_dc_df = product_dc[selected_product]
+        empty_note = None
         if full_dc_df is None or full_dc_df.empty or "hold_time" not in full_dc_df.columns:
             full_dc_df = pd.DataFrame(columns=DC_REQUIRED)
-            st.caption(f"{selected_product}: 현재 hold 건이 없습니다.")
+            empty_note = f"{selected_product} 은(는) 조회 기간에 hold 건이 없습니다."
         # a clicked chart point is resolved against the full (unfiltered) set,
         # since its history shouldn't disappear just because the current status
         # filter happens to hide the lot it belongs to
         dc_df = filter_by_status(full_dc_df, status_filter)
         grouped = group_holds(dc_df)
+        # 빈 표만 남으면 고장난 화면처럼 보인다. 비어 있는 이유를 그 자리에서
+        # 말해준다 (정적 리포트의 리스트도 같은 문구를 쓴다)
+        if empty_note is None and grouped.empty:
+            empty_note = (
+                "조치 대기 중인 hold 가 없습니다. '전체' 나 '이력' 을 눌러보세요."
+                if status_filter == "hold" else "이 조건에 맞는 행이 없습니다."
+            )
+        if empty_note:
+            st.caption(empty_note)
 
         # a chart click on the previous run may have asked to switch the list's
         # own selection to a different lot; that has to happen here, before the

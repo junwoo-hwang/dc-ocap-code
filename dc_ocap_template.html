@@ -733,10 +733,29 @@ function renderListHeader() {
   });
 }
 
-function renderList(grouped) {
+function renderList(grouped, dcAll) {
   renderListHeader();
   listBody.innerHTML = "";
-  applySearchAndSort(grouped).forEach(row => {
+  const rows = applySearchAndSort(grouped);
+  if (!rows.length) {
+    // 빈 표만 남기면 '고장난 화면' 으로 보인다. 비어 있는 이유가 셋뿐이니
+    // 어느 쪽인지 그 자리에서 알려준다 -- 사람이 제일 먼저 하는 질문이다
+    const why = !(dcAll && dcAll.length)
+      ? `${state.product} 은(는) 조회 기간에 hold 건이 없습니다.`
+      : state.searchText.trim()
+      ? `"${state.searchText.trim()}" 와 맞는 행이 없습니다.`
+      : state.statusFilter === "hold"
+      ? "조치 대기 중인 hold 가 없습니다. '전체' 나 '이력' 을 눌러보세요."
+      : "이 조건에 맞는 행이 없습니다.";
+    const tr = el("tr");
+    const td = el("td", { text: why });
+    td.colSpan = LIST_COLS.length;
+    td.style.cssText = "text-align:center; color:#888; padding:24px 8px;";
+    tr.appendChild(td);
+    listBody.appendChild(tr);
+    return;
+  }
+  rows.forEach(row => {
     const tr = el("tr", { "data-lot-id": row.lot_id, "data-rw-cnt": row.rw_cnt });
     if (row.lot_id === state.selectedLotId && normRwCnt(row.rw_cnt) === normRwCnt(state.selectedRwCnt)) {
       tr.classList.add("selected");
@@ -1051,6 +1070,9 @@ function wacGroups(product, itemCol) {
   if (WAC_MAX_GRAY && g[WAC_TREND].length > WAC_MAX_GRAY) {
     const src = g[WAC_TREND], step = src.length / WAC_MAX_GRAY, out = [];
     for (let k = 0; k < WAC_MAX_GRAY; k++) out.push(src[Math.floor(k * step)]);
+    // 마지막 점은 따로 넣는다. floor(k*step) 은 끝에 못 닿아서, 그냥 두면
+    // 차트가 실제보다 최대 step 개만큼 일찍 끝난 것처럼 보인다
+    if (out[out.length - 1] !== src[src.length - 1]) out.push(src[src.length - 1]);
     g[WAC_TREND] = out;
   }
   return { g, byLot };
@@ -1257,7 +1279,7 @@ function renderAll() {
   const dcAll = DATA.dc[state.product];
   const dcFiltered = filterByStatus(dcAll, state.statusFilter);
   const grouped = groupHolds(dcFiltered);
-  renderList(grouped);
+  renderList(grouped, dcAll);
   renderDetail(dcAll);
   renderTrendAndComment(dcAll, dcFiltered);
 }
