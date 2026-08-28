@@ -183,6 +183,22 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
     base_rows = trend_df[trend_df["rw_cnt"] == 0]
     item_cols = [c for c in trend_df.columns if c.startswith("item")]
 
+    # Limits belong to the item, not to the hold: the measured value differs
+    # every time but USL/LSL/UCL/LCL are the item's spec, so every hold of
+    # the same item_id must repeat the same four numbers. Drawn once here
+    # rather than per hold, or the WAC page would find several conflicting
+    # sets for one item and have to guess which is current.
+    item_limits = {}
+    for item_id in item_cols:
+        spread = cfg["spread"]
+        base = rng.normal(loc=cfg["center"], scale=spread)
+        item_limits[item_id] = {
+            "usl": round(base + rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "lsl": round(base - rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "ucl": round(base + rng.uniform(spread * 0.6, spread * 1.2), 3),
+            "lcl": round(base - rng.uniform(spread * 0.6, spread * 1.2), 3),
+        }
+
     rows = []
     events = []  # (lot_id, src_lot, hold_time) already emitted, for reworks
     # holds arrive as lots, not as single wafers: one lot_id covers several
@@ -228,12 +244,7 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
             status = rng.choice(["Active", "Run", "Hold"], p=[0.6, 0.3, 0.1])
 
         for item_id in items:
-            spread = cfg["spread"]
-            base = rng.normal(loc=cfg["center"], scale=spread)
-            usl = base + rng.uniform(spread * 1.5, spread * 2.5)
-            lsl = base - rng.uniform(spread * 1.5, spread * 2.5)
-            ucl = base + rng.uniform(spread * 0.6, spread * 1.2)
-            lcl = base - rng.uniform(spread * 0.6, spread * 1.2)
+            lim = item_limits[item_id]
             hold_inform = rng.choice(HOLD_REASONS)
             step_seq = int(rng.integers(10, 500))
             line_id = rng.choice(LINE_IDS)
@@ -248,10 +259,10 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
                         "hold_time": hold_time,
                         "item_id": item_id,
                         "hold_inform": hold_inform,
-                        "ucl": round(ucl, 3),
-                        "lcl": round(lcl, 3),
-                        "usl": round(usl, 3),
-                        "lsl": round(lsl, 3),
+                        "ucl": lim["ucl"],
+                        "lcl": lim["lcl"],
+                        "usl": lim["usl"],
+                        "lsl": lim["lsl"],
                         "step_seq": step_seq,
                         "line_id": line_id,
                         "process_id": cfg["process_id"],

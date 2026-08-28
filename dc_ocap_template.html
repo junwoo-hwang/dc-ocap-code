@@ -121,6 +121,7 @@
   .wac-search { margin-bottom: 0; flex: 1; }
   .wac-stamp { font-size: 0.8rem; color: #888; text-align: right; }
   /* 가로 2개 고정, 세로로는 item 수만큼 */
+  .wac-selected { font-size: 0.85rem; color: #d33; font-weight: 600; min-height: 1.2em; }
   .wac-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
   .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
@@ -219,6 +220,7 @@
         <div class="wac-stamp">(Latest Data : __GENERATED_AT__)</div>
       </div>
     </div>
+    <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
     <div id="wacEmpty" class="info-box" hidden></div>
   </div>
@@ -925,21 +927,18 @@ function renderTrendAndComment(dcAll, dcFiltered) {
 // WAC Trend 페이지
 // ====================================================================
 
-// 관리선은 trend 에 없고 dc 에만 있다. 같은 item 이라도 hold 마다 값이
-// 달라질 수 있어서, 가장 최근 hold 의 것을 그 item 의 현재 규격으로 본다.
+// 관리선은 trend 에 없고 dc 에만 있다. 규격은 item 의 성질이라 같은
+// item_id 면 hold 가 달라도 같은 값이므로, 처음 만나는 행 하나면 충분하다.
 // dc 에 한 번도 안 걸린 item 은 관리선을 알 수 없으므로 null.
 const _wacLimitCache = new Map();
 function wacLimits(product, itemId) {
   const key = product + "||" + itemId;
   if (_wacLimitCache.has(key)) return _wacLimitCache.get(key);
   const want = String(itemId).trim().toLowerCase();
-  let best = null;
-  for (const r of DATA.dc[product]) {
-    if (String(r.item_id).trim().toLowerCase() !== want) continue;
-    if (!best || (r.hold_time && r.hold_time > best.hold_time)) best = r;
-  }
-  const lim = best ? { ucl: toFloat(best.ucl), lcl: toFloat(best.lcl),
-                       usl: toFloat(best.usl), lsl: toFloat(best.lsl) } : null;
+  const hit = DATA.dc[product].find(
+    r => String(r.item_id).trim().toLowerCase() === want);
+  const lim = hit ? { ucl: toFloat(hit.ucl), lcl: toFloat(hit.lcl),
+                      usl: toFloat(hit.usl), lsl: toFloat(hit.lsl) } : null;
   _wacLimitCache.set(key, lim);
   return lim;
 }
@@ -956,78 +955,189 @@ function wacRows(product, itemCol) {
     if (raw === null || raw === undefined) continue;
     const val = Number(raw);
     if (!Number.isFinite(val)) continue;
-    out.push({ ...r, _val: val, _hoverTime: formatHoverTime(r.tkout_time) });
+    // 좌표/hover 를 여기서 한 번만 만들어 둔다. 타점을 누를 때마다 차트를
+    // 전부 다시 그리는데, 그때마다 수만 행을 다시 훑으면 클릭이 느려진다
+    out.push({ root_lot_id: r.root_lot_id, wafer_id: r.wafer_id,
+               _x: r.tkout_time, _val: val,
+               _cd: [r.root_lot_id, r.wafer_id, formatHoverTime(r.tkout_time),
+                     r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt],
+               _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id) });
   }
   _wacRowCache.set(key, out);
   return out;
 }
 
 const WAC_SIZE = 6, WAC_SIZE_SEL = 14;
+const WAC_GRAY = "lightgray", WAC_SAME = "dimgray";
+// 배경(회색) 타점이 이보다 많으면 고르게 솎아서 그린다. 260px 짜리 차트에
+// 수천 점을 찍으면 대부분 겹쳐서 그림은 그대로인데, 다시 그리는 비용만
+// 점 수에 비례해 늘어난다. CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게
+// 봐야 할 신호다. 0 으로 두면 솎지 않고 전부 그린다.
+const WAC_MAX_GRAY = 2500;
 
-function buildWacTraces(product, itemCol, lim, sel) {
+// 차트마다 트레이스 3개를 '고정' 으로 둔다: 회색 / CL OUT / SL OUT.
+// 선택이 바뀌어도 어느 타점이 어느 트레이스에 속하는지는 그대로이고
+// 색/크기 배열만 달라지므로, 클릭할 때 Plotly.restyle 만 하면 된다.
+// (트레이스를 다시 만들면 차트 20여 개를 통째로 다시 그려야 해서 느리다)
+const WAC_TREND = 0, WAC_CL = 1, WAC_SL = 2;
+
+function wacGroups(product, itemCol, lim) {
   const rows = wacRows(product, itemCol);
   const ucl = lim ? lim.ucl : null, lcl = lim ? lim.lcl : null;
   const usl = lim ? lim.usl : null, lsl = lim ? lim.lsl : null;
-  const slOut = r => (usl !== null && r._val > usl) || (lsl !== null && r._val < lsl);
-  const clOut = r => !slOut(r) && ((ucl !== null && r._val > ucl) || (lcl !== null && r._val < lcl));
-
-  const selLot = sel ? normLot(sel.rootLotId) : null;
-  const isSel = r => sel && normLot(r.root_lot_id) === selLot
-                        && normWafer(r.wafer_id) === normWafer(sel.waferId);
-  const sameLot = r => sel && normLot(r.root_lot_id) === selLot && !isSel(r);
-
-  const g = { sl: [], cl: [], same: [], other: [] };
+  const g = [[], [], []];
+  const byLot = new Map();
   for (const r of rows) {
-    if (slOut(r)) g.sl.push(r);
-    else if (clOut(r)) g.cl.push(r);
-    else if (sameLot(r)) g.same.push(r);
-    else g.other.push(r);
+    const v = r._val;
+    let i;
+    if ((usl !== null && v > usl) || (lsl !== null && v < lsl)) i = WAC_SL;
+    else if ((ucl !== null && v > ucl) || (lcl !== null && v < lcl)) i = WAC_CL;
+    else i = WAC_TREND;
+    // 자기 색을 행에 심어둔다 -- 덧그릴 때 그룹을 다시 판정하지 않아도 된다
+    r._c = i === WAC_TREND ? WAC_GRAY : (i === WAC_CL ? LIMIT_COLORS.control : LIMIT_COLORS.scrap);
+    g[i].push(r);
+    // lot 색인. 클릭하면 그 lot 만 훑으면 되므로 전체를 다시 안 봐도 된다
+    let b = byLot.get(r._lot);
+    if (!b) byLot.set(r._lot, b = []);
+    b.push(r);
   }
-
-  const traces = [];
-  function add(grp, color, name, rank) {
-    if (!grp.length) return;
-    // 클릭한 타점만 커진다. 색은 그대로라 어느 그룹인지도 계속 보인다
-    const sizes = grp.map(r => isSel(r) ? WAC_SIZE_SEL : WAC_SIZE);
-    traces.push({
-      x: grp.map(r => r.tkout_time), y: grp.map(r => r._val),
-      mode: "markers", name, legendrank: rank,
-      marker: { color, size: sizes },
-      customdata: grp.map(r => [r.root_lot_id, r.wafer_id, r._hoverTime,
-                                r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt]),
-      hovertemplate: HOVER_TEMPLATE,
-    });
+  // 배경만 고르게 솎는다 (앞뒤 끝은 남겨 기간이 짧아 보이지 않게)
+  if (WAC_MAX_GRAY && g[WAC_TREND].length > WAC_MAX_GRAY) {
+    const src = g[WAC_TREND], step = src.length / WAC_MAX_GRAY, out = [];
+    for (let k = 0; k < WAC_MAX_GRAY; k++) out.push(src[Math.floor(k * step)]);
+    g[WAC_TREND] = out;
   }
-  add(g.other, "lightgray", "trend", 1100);
-  add(g.same, "dimgray", sel ? normLot(sel.rootLotId) : "same lot", 1050);
-  add(g.cl, LIMIT_COLORS.control, "CL OUT", 20);
-  add(g.sl, LIMIT_COLORS.scrap, "SL OUT", 10);
+  return { g, byLot };
+}
 
+// 선택 표시는 '덧그리기' 로 한다. 바탕 3개(회색/CL/SL)는 한 번 그리고
+// 끝이고, 그 위에 같은 lot 과 고른 타점만 작은 트레이스로 얹는다.
+// 바탕 배열(수천 점)을 클릭마다 갈아끼우면 SVG 든 WebGL 이든 느리다 --
+// 실제로 바뀌는 건 lot 하나, wafer 하나 분량뿐이다.
+const WAC_OV_LOT = 3, WAC_OV_SEL = 4;
+
+function wacOverlays(entry, sel) {
+  const empty = { x: [], y: [], color: [], size: [] };
+  if (!sel) return [empty, empty];
+  const selLot = normLot(sel.rootLotId), selWf = normWafer(sel.waferId);
+  const rows = entry.byLot.get(selLot) || [];
+  const lot = { x: [], y: [], color: [], size: [] };
+  const hit = { x: [], y: [], color: [], size: [] };
+  for (const r of rows) {
+    if (r._wf === selWf) {
+      // 고른 타점: 커지되 색은 자기 그룹 색 그대로 -- CL/SL 인지 계속 보인다
+      hit.x.push(r._x); hit.y.push(r._val);
+      hit.color.push(r._c); hit.size.push(WAC_SIZE_SEL);
+    } else if (r._c === WAC_GRAY) {
+      // 같은 lot 은 회색 타점만 진하게. CL/SL 은 제 색을 잃으면 안 된다
+      lot.x.push(r._x); lot.y.push(r._val);
+      lot.color.push(WAC_SAME); lot.size.push(WAC_SIZE);
+    }
+  }
+  return [lot, hit];
+}
+
+function wacLayout(itemCol, lim) {
   const shapes = [], annotations = [];
   function hline(y, color, text, atTop) {
-    if (y === null) return;
+    if (y === null || y === undefined) return;
     shapes.push({ type: "line", xref: "paper", x0: 0, x1: 1, yref: "y", y0: y, y1: y,
                   line: { color, dash: "dash" } });
     annotations.push({ xref: "paper", x: 0, xanchor: "left", yref: "y", y, text,
                        showarrow: false, font: { color, size: 10 },
                        yanchor: atTop ? "bottom" : "top" });
   }
-  hline(ucl, "blue", "UCL", true); hline(lcl, "blue", "LCL", false);
-  hline(usl, "red", "USL", true);  hline(lsl, "red", "LSL", false);
-
+  if (lim) {
+    hline(lim.ucl, "blue", "UCL", true); hline(lim.lcl, "blue", "LCL", false);
+    hline(lim.usl, "red", "USL", true);  hline(lim.lsl, "red", "LSL", false);
+  }
   return {
-    traces,
-    layout: {
-      xaxis: { title: { text: "tkout_time" } },
-      yaxis: { title: { text: itemCol } },
-      legend: { font: { size: 9 }, itemsizing: "constant", tracegroupgap: 0 },
-      shapes, annotations,
-      margin: { t: 24, b: 34, l: 52, r: 12 },
-      height: 260,
-      uirevision: itemCol,      // 클릭해도 확대/이동 상태는 유지
-    },
-    n: rows.length,
+    xaxis: { title: { text: "tkout_time" } },
+    yaxis: { title: { text: itemCol } },
+    legend: { font: { size: 9 }, itemsizing: "constant", tracegroupgap: 0 },
+    shapes, annotations,
+    margin: { t: 24, b: 34, l: 52, r: 12 },
+    height: 260,
+    uirevision: itemCol,      // 클릭해도 확대/이동 상태는 유지
   };
+}
+
+// 그려진 차트들. 클릭 때 restyle 대상이자, 스크롤로 뒤늦게 그려지는
+// 차트에 현재 선택을 그대로 입히기 위한 목록이기도 하다.
+let wacCharts = [];
+
+function wacDrawChart(entry) {
+  if (entry.drawn) return;
+  entry.drawn = true;
+  const { div, itemCol, lim } = entry;
+  // 여기서 처음 계산한다. renderWac 에서 미리 다 해두면 화면에 보이지도
+  // 않는 item 수십 개 x 수천 행을 첫 화면 뜨기 전에 훑게 된다
+  if (!entry.groups) {
+    const built = wacGroups(state.product, itemCol, lim);
+    entry.groups = built.g; entry.byLot = built.byLot;
+  }
+  const groups = entry.groups;
+  const names = ["trend", "CL OUT", "SL OUT"];
+  const ranks = [1100, 20, 10];
+  const colors = [WAC_GRAY, LIMIT_COLORS.control, LIMIT_COLORS.scrap];
+  const traces = [WAC_TREND, WAC_CL, WAC_SL].map(i => ({
+    // scattergl(WebGL) 은 여기서 쓰면 안 된다. 브라우저는 WebGL 컨텍스트를
+    // 16개 안팎까지만 살려두는데 이 화면은 차트가 20개를 넘어서, 넘어가는
+    // 순간 "Too many active WebGL contexts" 와 함께 먼저 그린 차트가 통째로
+    // 비어버린다. 속도는 스크롤에 맞춘 지연 렌더와 restyle 로 확보한다.
+    type: "scatter",
+    x: groups[i].map(r => r._x), y: groups[i].map(r => r._val),
+    mode: "markers", name: names[i], legendrank: ranks[i],
+    marker: { color: colors[i], size: WAC_SIZE },
+    customdata: groups[i].map(r => r._cd),
+    hovertemplate: HOVER_TEMPLATE,
+  }));
+  const [lotOv, hitOv] = wacOverlays(entry, state.wacSelected);
+  for (const ov of [lotOv, hitOv]) {
+    traces.push({
+      type: "scatter", x: ov.x, y: ov.y, mode: "markers",
+      marker: { color: ov.color, size: ov.size },
+      showlegend: false, hoverinfo: "skip",
+    });
+  }
+  Plotly.react(div, traces, wacLayout(itemCol, lim),
+               { displayModeBar: false, responsive: true });
+  div.on("plotly_click", (ev) => {
+    const pt = ev.points && ev.points[0];
+    if (!pt || !pt.customdata) return;
+    const [root, wafer] = pt.customdata;
+    const cur = state.wacSelected;
+    // 같은 타점을 다시 누르면 선택 해제
+    state.wacSelected = (cur && normLot(cur.rootLotId) === normLot(root)
+                             && normWafer(cur.waferId) === normWafer(wafer))
+      ? null : { rootLotId: root, waferId: wafer };
+    wacApplySelection();
+  });
+}
+
+function wacPaintSelection(e) {
+  const [lot, hit] = wacOverlays(e, state.wacSelected);
+  // 바탕 3개는 건드리지 않는다. 덧그림 2개만 바꾸므로 lot 하나 분량이다
+  Plotly.restyle(e.div, {
+    x: [lot.x, hit.x], y: [lot.y, hit.y],
+    "marker.color": [lot.color, hit.color], "marker.size": [lot.size, hit.size],
+  }, [WAC_OV_LOT, WAC_OV_SEL]);
+}
+
+// 선택이 바뀌면 덧그림만 갈아끼운다 -- 보이는 차트부터
+function wacApplySelection() {
+  const sel = state.wacSelected;
+  document.getElementById("wacSelected").textContent = sel
+    ? `선택한 wafer : ${normLot(sel.rootLotId)} #${normWafer(sel.waferId)}  (다시 누르면 해제)`
+    : "";
+  for (const e of wacCharts) {
+    if (!e.drawn || !e.groups) continue;   // 아직 안 그린 차트는 그려질 때 반영된다
+    // restyle 은 덧그림 2개만 바꿔도 그 차트를 통째로 다시 그린다. 화면
+    // 밖 차트까지 지금 갱신하면 클릭이 그만큼 늦어지므로, 보이는 것만
+    // 즉시 하고 나머지는 스크롤로 들어올 때 처리한다
+    if (e.visible) wacPaintSelection(e);
+    else e.dirty = true;
+  }
 }
 
 function renderWac() {
@@ -1045,11 +1155,14 @@ function renderWac() {
 
   const grid = document.getElementById("wacGrid");
   const empty = document.getElementById("wacEmpty");
+  if (wacObserver) wacObserver.disconnect();
+  wacCharts = [];
   grid.innerHTML = "";
   if (!items.length) {
     empty.hidden = false;
     empty.textContent = q ? `"${state.wacSearch}" 와 맞는 item 이 없습니다.`
                           : "이 제품의 trend 에 item 컬럼이 없습니다.";
+    document.getElementById("wacSelected").textContent = "";
     return;
   }
   empty.hidden = true;
@@ -1060,25 +1173,32 @@ function renderWac() {
     box.appendChild(el("div", { class: "wac-chart-title", text: itemCol }));
     if (!lim) box.appendChild(el("div", { class: "wac-nolimit",
       text: "관리선 없음 (dc 에 hold 이력이 없는 item)" }));
-    const div = el("div");
+    const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);
-
-    const { traces, layout } = buildWacTraces(state.product, itemCol, lim, state.wacSelected);
-    Plotly.react(div, traces, layout, { displayModeBar: false, responsive: true });
-    div.on("plotly_click", (ev) => {
-      const pt = ev.points && ev.points[0];
-      if (!pt || !pt.customdata) return;
-      const [root, wafer] = pt.customdata;
-      const cur = state.wacSelected;
-      // 같은 타점을 다시 누르면 선택 해제
-      state.wacSelected = (cur && normLot(cur.rootLotId) === normLot(root)
-                               && normWafer(cur.waferId) === normWafer(wafer))
-        ? null : { rootLotId: root, waferId: wafer };
-      renderWac();     // 모든 차트에 한 번에 반영
-    });
+    wacCharts.push({ div, itemCol, lim, groups: null,
+                     drawn: false, visible: false, dirty: false });
   });
+
+  // 화면에 들어온 차트부터 그린다. 20여 개를 한꺼번에 그리면 첫 화면이
+  // 그만큼 늦게 뜨는데, 정작 처음 보이는 건 두어 개뿐이다
+  wacCharts.forEach(e => { e.div._wacEntry = e; wacObserver.observe(e.div); });
+  wacApplySelection();
 }
+
+// 계속 관찰한다: 처음 보일 때 그리고, 그 뒤로는 '지금 보이는지' 를 들고
+// 있다가 선택이 바뀔 때 보이는 것만 먼저 갱신하는 데 쓴다
+const wacObserver = new IntersectionObserver((entries) => {
+  for (const en of entries) {
+    const e = en.target._wacEntry;
+    if (!e) continue;
+    e.visible = en.isIntersecting;
+    if (!en.isIntersecting) continue;
+    wacDrawChart(e);
+    // 안 보이는 동안 선택이 바뀌었으면 이제 반영한다
+    if (e.dirty) { wacPaintSelection(e); e.dirty = false; }
+  }
+}, { rootMargin: "300px" });
 
 function renderAll() {
   if (state.page === "wac") { renderWac(); return; }
