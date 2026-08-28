@@ -128,25 +128,6 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     end_dt = datetime(2026, 8, 12, 23, 59, 59)
     span_seconds = int((end_dt - start_dt).total_seconds())
 
-    # 규격은 시점에 따라 바뀐다. item 마다 8/1 전후 두 벌을 잡아두고, 각
-    # 측정 행에 그때 유효했던 값을 실어 보낸다. 일부 item 만 바뀌게 두어야
-    # '바뀐 경우' 와 '안 바뀐 경우' 를 둘 다 시험할 수 있다.
-    item_spec = {}
-    for i in range(n_items):
-        spread, center = cfg["spread"], cfg["center"]
-        before = {
-            "usl": round(center + rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "lsl": round(center - rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "ucl": round(center + rng.uniform(spread * 0.6, spread * 1.2), 3),
-            "lcl": round(center - rng.uniform(spread * 0.6, spread * 1.2), 3),
-        }
-        if rng.random() < 0.4:
-            bump = round(rng.uniform(spread * 0.3, spread * 0.8), 3)
-            after = {**before, "usl": round(before["usl"] + bump, 3),
-                     "ucl": round(before["ucl"] + bump, 3)}
-        else:
-            after = before
-        item_spec[f"item{i + 1}"] = (before, after)
 
 
     rows = []
@@ -179,11 +160,7 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
                 "rw_cnt": rw,
             }
             for i in range(n_items):
-                item = f"item{i + 1}"
-                row[item] = round(float(values[i]), 3) if not np.isnan(values[i]) else np.nan
-                # 그 측정 시점에 유효했던 규격을 같이 싣는다
-                for which, v in item_spec[item][1 if tkout_time >= SPEC_CHANGE else 0].items():
-                    row[limit_col(item, which)] = v
+                row[f"item{i + 1}"] = round(float(values[i]), 3) if not np.isnan(values[i]) else np.nan
             rows.append(row)
 
     return pd.DataFrame(rows).sort_values("tkout_time").reset_index(drop=True)
@@ -191,6 +168,38 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
 
 # 규격이 한 번 상향된 날. 이 앞뒤로 값이 달라져야 차트에 계단이 생긴다.
 SPEC_CHANGE = datetime(2026, 8, 1)
+
+
+def generate_spec_for_product(product: str, trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Mock spec table: one row per (item_id, from_time) revision.
+
+    Keyed by when the spec took effect, which is what a spec actually is --
+    a revision with a start date. It stays a few dozen rows however much
+    history accumulates, and the limit line it draws is two or three points
+    that step exactly on the revision date.
+    """
+    cfg = PRODUCT_CONFIG[product]
+    rng = np.random.default_rng(cfg["seed"] + 7)
+    start = trend_df["tkout_time"].min() if not trend_df.empty else datetime(2026, 1, 1)
+
+    rows = []
+    for item in item_columns(trend_df):
+        spread, center = cfg["spread"], cfg["center"]
+        first = {
+            "usl": round(center + rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "lsl": round(center - rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "ucl": round(center + rng.uniform(spread * 0.6, spread * 1.2), 3),
+            "lcl": round(center - rng.uniform(spread * 0.6, spread * 1.2), 3),
+        }
+        rows.append({"item_id": item, "from_time": start, **first})
+        # 일부 item 만 바꾼다: 계단도, 평평한 선도 둘 다 시험해야 한다
+        if rng.random() < 0.4:
+            bump = round(rng.uniform(spread * 0.3, spread * 0.8), 3)
+            rows.append({"item_id": item, "from_time": SPEC_CHANGE,
+                         **{**first, "usl": round(first["usl"] + bump, 3),
+                            "ucl": round(first["ucl"] + bump, 3)}})
+    return (pd.DataFrame(rows)[SPEC_REQUIRED]
+            .sort_values(["item_id", "from_time"]).reset_index(drop=True))
 
 
 def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 50, seed: int | None = None) -> pd.DataFrame:
@@ -335,13 +344,13 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
 
 
 def pull_data():
-    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend).
+    """Return dc x3, trend x3, spec x3 (ULY, SOL, TTS in that order).
 
-    The control limits live in trend, next to the measurement, as
-    item1_ucl / item1_lcl / item1_usl / item1_lsl beside item1. They are
-    not in dc because the spec in force changes over time: a wafer
-    measured in July and one measured in August are judged against
-    different numbers, and the chart draws that as a step.
+    spec_* holds the control limits as revisions --
+    (item_id, from_time, ucl, lcl, usl, lsl), one row per time the spec
+    changed. They are not in dc because the spec in force changes over
+    time: a wafer measured in July and one measured in August are judged
+    against different numbers, and the chart steps on the date it changed.
 
     Put the real company-system pull in here. It must be a function, not
     bare module-level code: Streamlit re-runs this file top to bottom on
@@ -356,7 +365,13 @@ def pull_data():
     dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
     dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
-    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend
+    spec_uly = generate_spec_for_product("ULY", uly_trend)
+    spec_sol = generate_spec_for_product("SOL", sol_trend)
+    spec_tts = generate_spec_for_product("TTS", tts_trend)
+
+    return (dc_uly, dc_sol, dc_tts,
+            uly_trend, sol_trend, tts_trend,
+            spec_uly, spec_sol, spec_tts)
 
 
 # ======================================================================
@@ -413,31 +428,56 @@ DC_HOLD_URL = "https://go/dcocap"
 # ... beside item1, because the spec in force changes over time and each row
 # has to carry the one that applied when that wafer came out of test.
 LIMIT_COLS = ("ucl", "lcl", "usl", "lsl")
+SPEC_REQUIRED = ["item_id", "from_time", *LIMIT_COLS]
 # trend's own columns, everything else is either an item or one of its limits
 META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time",
                    "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
 
 
-def limit_col(item_col: str, which: str) -> str:
-    """Column holding `which` limit for `item_col` -- item1 -> item1_usl."""
-    return f"{item_col}_{which}"
-
-
 def item_columns(trend_df) -> list:
-    """The measurement columns of a trend frame.
+    """The measurement columns of a trend frame (everything but its metadata)."""
+    return [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
 
-    Everything that is not trend's own metadata and does not end in a limit
-    suffix -- so item1 counts and item1_usl does not, or the WAC grid would
-    draw a chart per limit column.
+
+def item_spec_rows(spec_df, item_id) -> pd.DataFrame:
+    """One item's revisions, oldest first, with the limits coerced to float."""
+    empty = pd.DataFrame(columns=SPEC_REQUIRED)
+    if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
+        return empty
+    if "item_id" not in spec_df.columns or "from_time" not in spec_df.columns:
+        return empty
+    key = str(item_id).strip().lower()
+    rows = spec_df[spec_df["item_id"].astype(str).str.strip().str.lower() == key].copy()
+    if rows.empty:
+        return rows
+    rows["from_time"] = pd.to_datetime(rows["from_time"], errors="coerce")
+    for w in LIMIT_COLS:
+        rows[w] = pd.to_numeric(rows[w], errors="coerce") if w in rows.columns else np.nan
+    return rows.dropna(subset=["from_time"]).sort_values("from_time")
+
+
+def limits_asof(spec_rows: pd.DataFrame, times) -> dict:
+    """Limits in force at each of `times` -> {which: Series aligned to times}.
+
+    merge_asof(direction="backward") is exactly "which revision was live
+    when this was measured": the newest revision at or before each
+    measurement, and NaN for anything measured before the first one.
     """
-    out = []
-    for c in trend_df.columns:
-        name = str(c)
-        if name in META_TREND_COLS:
-            continue
-        if any(name.endswith("_" + w) for w in LIMIT_COLS):
-            continue
-        out.append(c)
+    idx = getattr(times, "index", None)
+    t = pd.Series(pd.to_datetime(pd.Series(times).values, errors="coerce"))
+    if spec_rows.empty:
+        out = {w: pd.Series(np.nan, index=t.index, dtype="float64") for w in LIMIT_COLS}
+    else:
+        left = pd.DataFrame({"_t": t}).reset_index()
+        merged = (pd.merge_asof(left.sort_values("_t"),
+                                spec_rows[["from_time", *LIMIT_COLS]],
+                                left_on="_t", right_on="from_time",
+                                direction="backward")
+                  .set_index("index").reindex(t.index))
+        out = {w: merged[w].astype("float64") for w in LIMIT_COLS}
+    if idx is not None:
+        for w in out:
+            out[w].index = idx
     return out
 
 
@@ -647,7 +687,8 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[str]]:
+def check_data(product_dc: dict, trend_frames: dict,
+               spec_frames: dict | None = None) -> tuple[list[str], list[str]]:
     """Return (fatal, warnings) about what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
@@ -713,35 +754,49 @@ def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[st
         # if one of these came back as text (e.g. a BigQuery NUMERIC that
         # round-tripped as str/Decimal). Cheap to check in full -- only 4
         # columns, unlike the per-item trend checks below.
-        # 관리선은 trend 에 item 별로 붙어 있다 (item1_usl 등). 없으면 그
-        # item 은 관리선 없이 회색으로만 그려질 뿐이라 경고로 충분하다.
-        if not trend_df.empty:
-            missing_lim, bad_lim = [], []
-            for item_col in item_columns(trend_df):
-                for which in LIMIT_COLS:
-                    col = limit_col(item_col, which)
-                    if col not in trend_df.columns:
-                        missing_lim.append(col)
-                        continue
-                    n_bad = trend_df[col].map(
-                        lambda v: to_float(v) is None and pd.notna(v)).sum()
-                    if n_bad:
-                        bad_lim.append(f"{col}({n_bad}개)")
-            if len(missing_lim) == len(item_columns(trend_df)) * len(LIMIT_COLS):
-                warnings.append(
-                    f"{product.lower()}_trend: 관리선 컬럼이 하나도 없습니다 "
-                    f"(item1_usl 같은 컬럼). 모든 점이 회색으로만 그려집니다."
-                )
-            elif missing_lim:
-                warnings.append(
-                    f"{product.lower()}_trend: 관리선 컬럼 없음 -> {missing_lim[:6]}"
-                    f" (총 {len(missing_lim)}개). 해당 선은 안 그려집니다."
-                )
-            if bad_lim:
-                warnings.append(
-                    f"{product.lower()}_trend: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:5]}."
-                    f" 해당 선은 안 그려집니다. float 로 변환하세요."
-                )
+        # 관리선은 spec 프레임에 (item_id, from_time) 개정 이력으로 있다.
+        # 없거나 안 맞아도 그 점이 회색으로 그려질 뿐이라 대개 경고다.
+        spec_df = (spec_frames or {}).get(product)
+        if not isinstance(spec_df, pd.DataFrame):
+            warnings.append(
+                f"spec_{product.lower()}: DataFrame 이 아닙니다 "
+                f"({type(spec_df).__name__}). 관리선 없이 그려집니다."
+            )
+        elif spec_df.empty:
+            warnings.append(f"spec_{product.lower()}: 비어 있습니다. 관리선 없이 그려집니다.")
+        else:
+            missing = [c for c in SPEC_REQUIRED if c not in spec_df.columns]
+            if missing:
+                problems.append(f"spec_{product.lower()}: 컬럼 없음 -> {', '.join(missing)}")
+            else:
+                if not pd.api.types.is_datetime64_any_dtype(spec_df["from_time"]):
+                    warnings.append(
+                        f"spec_{product.lower()}: from_time 이 날짜형이 아닙니다 "
+                        f"({spec_df['from_time'].dtype}). pd.to_datetime() 으로 변환하세요."
+                    )
+                bad_lim = [f"{c}({n}개)" for c in LIMIT_COLS
+                           if (n := spec_df[c].map(
+                               lambda v: to_float(v) is None and pd.notna(v)).sum())]
+                if bad_lim:
+                    warnings.append(
+                        f"spec_{product.lower()}: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
+                        f"해당 선은 안 그려집니다. float 로 변환하세요."
+                    )
+                # trend 의 item 이 spec 에 있는가
+                if not trend_df.empty:
+                    have = set(spec_df["item_id"].astype(str).str.strip().str.lower())
+                    items = [str(c) for c in item_columns(trend_df)]
+                    miss = [i for i in items if i.strip().lower() not in have]
+                    if miss and len(miss) == len(items):
+                        problems.append(
+                            f"spec_{product.lower()}: trend 의 item 이 하나도 매칭되지 "
+                            f"않습니다. trend 예시 {items[:4]}, spec 예시 {sorted(have)[:4]}"
+                        )
+                    elif miss:
+                        warnings.append(
+                            f"spec_{product.lower()}: item {miss[:5]} 이(가) 없습니다 "
+                            f"({len(miss)}/{len(items)}종). 해당 차트는 관리선 없이 회색으로만 그려집니다."
+                        )
 
     return fatal, warnings
 
@@ -755,12 +810,14 @@ def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[st
 @st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
 def load_data():
     frames = pull_data()
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
+    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts) = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
     problems, warnings = check_data(
         {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
         {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
+        {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts},
     )
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
@@ -831,39 +888,47 @@ LIMIT_LINE_STYLE = {
 }
 
 
-def add_limit_steps(fig, times, lim: dict) -> None:
-    """Draw each limit as a step line rather than one flat rule.
+def add_limit_steps(fig, spec_rows: pd.DataFrame, x_min, x_max) -> None:
+    """Draw each limit as a step line built from the spec revisions.
 
-    A spec revision (USL 80 up to Aug 1, 85 after) has to read as a step at
-    the date it took effect -- drawing a single hline would put every point
-    on one side of a limit that was never in force for half of them. The
-    value is taken from the rows themselves, so the line follows whatever
-    the data says, however many times it changed.
+    Taken from the revisions rather than the measurements, so the step
+    lands on the date the spec changed instead of on the first wafer
+    measured after it, the line spans the chart even across a gap in
+    measurements, and it costs two or three points instead of one per row.
     """
-    order = np.argsort(times.values)
-    x = times.values[order]
-    for which, series in lim.items():
-        y = series.values[order]
-        if not np.isfinite(y).any():
+    if spec_rows.empty or pd.isna(x_min) or pd.isna(x_max):
+        return
+    for which in LIMIT_COLS:
+        xs, ys = [], []
+        for t, v in zip(spec_rows["from_time"], spec_rows[which]):
+            if pd.isna(v):
+                continue
+            if t <= x_min:
+                # 차트 시작 시점에 이미 적용 중이던 값 -- 왼쪽 끝에서 시작
+                xs, ys = [x_min], [v]
+            elif t <= x_max:
+                xs.append(t)
+                ys.append(v)
+        if not xs:
             continue
+        xs.append(x_max)          # 마지막 값을 오른쪽 끝까지 끌고 간다
+        ys.append(ys[-1])
         color, label = LIMIT_LINE_STYLE[which]
         fig.add_trace(go.Scatter(
-            x=x, y=y, mode="lines", name=label,
+            x=xs, y=ys, mode="lines", name=label,
             # hv: hold the old value until the moment it changes, then step
             line=dict(color=color, dash="dash", width=1, shape="hv"),
             hoverinfo="skip", showlegend=False,
         ))
-        first = next((v for v in y if np.isfinite(v)), None)
-        if first is not None:
-            fig.add_annotation(
-                xref="paper", x=0, xanchor="left", y=first, yref="y", text=label,
-                showarrow=False, font=dict(color=color, size=11),
-                yanchor="bottom" if which in ("ucl", "usl") else "top",
-            )
+        fig.add_annotation(
+            xref="paper", x=0, xanchor="left", y=ys[0], yref="y", text=label,
+            showarrow=False, font=dict(color=color, size=11),
+            yanchor="bottom" if which in ("ucl", "usl") else "top",
+        )
 
 
 def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
-                   legend_field: str | None,
+                   legend_field: str | None, spec_df,
                    chart_height: int, focus_pair: tuple | None = None) -> go.Figure:
     """Scatter one measurement item over time.
 
@@ -889,12 +954,8 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # limits come from the row, not from one number for the whole chart: the
     # spec in force changes over time, so each point is judged against the
     # one that applied when it was measured
-    lim = {}
-    for which in LIMIT_COLS:
-        col = limit_col(item_id, which)
-        lim[which] = (pd.to_numeric(plot_df[col], errors="coerce")
-                      if col in plot_df.columns
-                      else pd.Series(np.nan, index=plot_df.index, dtype="float64"))
+    spec_rows = item_spec_rows(spec_df, item_id)
+    lim = limits_asof(spec_rows, plot_df["tkout_time"])
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
@@ -1000,7 +1061,8 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
 
     # skip any limit that didn't parse to a number rather than passing None
     # through to plotly, which errors on a missing y just as it does on a str
-    add_limit_steps(fig, plot_df["tkout_time"], lim)
+    add_limit_steps(fig, spec_rows,
+                    plot_df["tkout_time"].min(), plot_df["tkout_time"].max())
 
     fig.update_layout(
         xaxis_title="tkout_time",
@@ -1036,9 +1098,11 @@ def show_dc_ocap():
     must be the first streamlit command, so it doesn't belong in here.
     """
     (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts,
      data_loaded_at, problems, data_warnings) = load_data()
 
     trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+    spec_frames = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
     product_dc = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
 
     if problems:
@@ -1338,6 +1402,7 @@ def show_dc_ocap():
 
                     fig = build_scatter(
                         tdf, item_col, bad_pairs, str(lot_id), legend_field,
+                        spec_frames.get(product),
                         chart_height=TREND_HEIGHT - 150, focus_pair=chart_focus_pair,
                     )
                     fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
@@ -1527,17 +1592,19 @@ def _columns(df: pd.DataFrame) -> dict:
 
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
-    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = pull_data()
+    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
+     spec_uly, spec_sol, spec_tts) = pull_data()
 
     product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
+    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
     # a broken dc_ocap.html. Warnings are printed but must not stop the
     # build: this runs hourly and uploads to S3, so failing over a few
     # wafers missing from trend would freeze the portal on a stale report.
-    problems, warnings = check_data(product_dc, product_trend)
+    problems, warnings = check_data(product_dc, product_trend, product_spec)
     if problems:
         raise SystemExit(
             "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
@@ -1553,6 +1620,12 @@ def build_dc_ocap_html() -> Path:
             p: item_columns(product_trend[p])
             for p in product_trend
         },
+        # 관리선 개정 이력. from_time 은 브라우저가 문자열로 비교할 수 있게
+        # ISO 로 넘긴다 (_clean 이 Timestamp 를 isoformat 으로 바꿔준다)
+        "spec": {p: _columns(product_spec[p][SPEC_REQUIRED])
+                 if isinstance(product_spec[p], pd.DataFrame)
+                 and not product_spec[p].empty else {}
+                 for p in product_spec},
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")

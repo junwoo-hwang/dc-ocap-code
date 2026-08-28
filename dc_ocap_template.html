@@ -263,21 +263,45 @@ async function loadData() {
   const parsed = JSON.parse(await new Response(stream).text());
   for (const p of Object.keys(parsed.dc)) parsed.dc[p] = expandColumnar(parsed.dc[p]);
   for (const p of Object.keys(parsed.trend)) parsed.trend[p] = expandColumnar(parsed.trend[p]);
+  for (const p of Object.keys(parsed.spec || {})) parsed.spec[p] = expandColumnar(parsed.spec[p]);
   return parsed;
 }
 
 const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
-// 관리선은 trend 안에 item1_ucl / item1_usl ... 로 측정값 옆에 붙어 있다.
-// 적용 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 각 행이
-// 그때 유효했던 값을 들고 있다. (app.py 의 limit_col 과 동일)
+// 관리선은 DATA.spec 에 (item_id, from_time) 개정 이력으로 들어 있다.
+// 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 점마다 그때
+// 유효했던 개정을 찾아 쓴다. (app.py 의 limits_asof 와 같은 규칙)
 const LIMIT_COLS = ["ucl","lcl","usl","lsl"];
 const LIMIT_LINE_STYLE = { ucl:["blue","UCL"], lcl:["blue","LCL"],
                            usl:["red","USL"],  lsl:["red","LSL"] };
-function limitCol(itemCol, which) { return itemCol + "_" + which; }
-function rowLimits(r, itemCol) {
-  const o = {};
-  for (const w of LIMIT_COLS) o[w] = toFloat(r[limitCol(itemCol, w)]);
-  return o;
+const EMPTY_LIMITS = { ucl:null, lcl:null, usl:null, lsl:null };
+
+// 제품/item 별 개정 이력을 from_time 오름차순으로 한 번만 정리해 둔다
+const _specCache = new Map();
+function specRevisions(product, itemCol) {
+  const key = product + "||" + String(itemCol).trim().toLowerCase();
+  if (_specCache.has(key)) return _specCache.get(key);
+  const want = String(itemCol).trim().toLowerCase();
+  const out = [];
+  for (const r of (DATA.spec && DATA.spec[product]) || []) {
+    if (String(r.item_id).trim().toLowerCase() !== want) continue;
+    if (r.from_time === null || r.from_time === undefined) continue;
+    const lim = {};
+    for (const w of LIMIT_COLS) lim[w] = toFloat(r[w]);
+    out.push({ from: r.from_time, lim });
+  }
+  out.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+  _specCache.set(key, out);
+  return out;
+}
+
+// 그 시점에 살아 있던 개정 = from_time 이 t 이하인 것 중 가장 나중 것.
+// 이력이 두세 개뿐이라 뒤에서부터 훑는 걸로 충분하다.
+function limitsAt(revisions, t) {
+  for (let i = revisions.length - 1; i >= 0; i--) {
+    if (revisions[i].from <= t) return revisions[i].lim;
+  }
+  return EMPTY_LIMITS;      // 첫 개정보다 앞선 측정
 }
 const LEGEND_FIELD_OPTIONS = {
   "없음 (기본)": null,
@@ -502,36 +526,27 @@ function el(tag, props = {}, children = []) {
 // 로 바뀌었다면 그 시점에 선이 꺾여야 하고, 한 줄로 그으면 절반의 점은
 // 자기에게 적용된 적 없는 선을 기준으로 보이게 된다. shape:"hv" 는 값이
 // 바뀌는 순간까지 이전 값을 유지하다가 수직으로 꺾는다.
-function addLimitSteps(traces, annotations, rows) {
-  if (!rows.length) return;
-  // DC OCAP 쪽 행은 tkout_time 을, WAC 쪽 행은 미리 뽑아둔 _x 를 쓴다
-  const xOf = (r) => (r._x !== undefined ? r._x : r.tkout_time);
-  const sorted = rows.slice().sort((a, b) => (xOf(a) < xOf(b) ? -1 : 1));
-  const x = sorted.map(xOf);
+function addLimitSteps(traces, annotations, revisions, xMin, xMax) {
+  if (!revisions.length || xMin === undefined || xMax === undefined) return;
   for (const which of LIMIT_COLS) {
-    // 값이 바뀌는 지점만 남긴다. 행마다 점을 찍으면 두세 값짜리 선이
-    // 수천 점이 되어, 정작 데이터보다 관리선이 무거워진다
-    const px = [], py = [];
-    let prev;
-    for (let i = 0; i < sorted.length; i++) {
-      const v = sorted[i]._lim[which];
+    let xs = [], ys = [];
+    for (const rev of revisions) {
+      const v = rev.lim[which];
       if (v === null || !Number.isFinite(v)) continue;
-      if (px.length === 0 || v !== prev) { px.push(x[i]); py.push(v); prev = v; }
+      if (rev.from <= xMin) { xs = [xMin]; ys = [v]; }   // 이미 적용 중이던 값
+      else if (rev.from <= xMax) { xs.push(rev.from); ys.push(v); }
     }
-    if (!px.length) continue;
-    if (px[px.length - 1] !== x[x.length - 1]) {   // 오른쪽 끝까지 끌고 간다
-      px.push(x[x.length - 1]); py.push(py[py.length - 1]);
-    }
-    const y = py;
+    if (!xs.length) continue;
+    xs.push(xMax); ys.push(ys[ys.length - 1]);   // 오른쪽 끝까지 끌고 간다
     const [color, label] = LIMIT_LINE_STYLE[which];
     traces.push({
-      type: "scatter", x: px, y: py, mode: "lines", name: label,
+      type: "scatter", x: xs, y: ys, mode: "lines", name: label,
+      // hv: 값이 바뀌는 순간까지 이전 값을 유지하다가 수직으로 꺾는다
       line: { color, dash: "dash", width: 1, shape: "hv" },
       hoverinfo: "skip", showlegend: false,
     });
-    const first = y.find(v => v !== null && Number.isFinite(v));
-    if (first !== undefined) annotations.push({
-      xref: "paper", x: 0, xanchor: "left", yref: "y", y: first, text: label,
+    annotations.push({
+      xref: "paper", x: 0, xanchor: "left", yref: "y", y: ys[0], text: label,
       showarrow: false, font: { color, size: 10 },
       yanchor: (which === "ucl" || which === "usl") ? "bottom" : "top",
     });
@@ -540,6 +555,7 @@ function addLimitSteps(traces, annotations, rows) {
 
 function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, focusPair) {
   const trend = DATA.trend[product];
+  const revs = specRevisions(product, itemCol);
   const rows = [];
   for (const r of trend) {
     const raw = r[itemCol];
@@ -547,7 +563,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     const val = Number(raw);
     if (!Number.isFinite(val)) continue;
     // 이 점이 측정될 때 유효했던 관리선을 같이 들고 다닌다
-    rows.push({ ...r, _val: val, _lim: rowLimits(r, itemCol),
+    rows.push({ ...r, _val: val, _lim: limitsAt(revs, r.tkout_time),
                 _hoverTime: formatHoverTime(r.tkout_time) });
   }
 
@@ -633,7 +649,10 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
   }
 
   const annotations = [];
-  addLimitSteps(traces, annotations, rows);
+  const xs0 = rows.map(r => r.tkout_time);
+  addLimitSteps(traces, annotations, revs,
+                xs0.length ? xs0.reduce((a,b)=>a<b?a:b) : undefined,
+                xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
 
   const layout = {
     xaxis: { title: { text: "tkout_time" } },
@@ -976,6 +995,7 @@ function wacRows(product, itemCol) {
   const key = product + "||" + itemCol;
   if (_wacRowCache.has(key)) return _wacRowCache.get(key);
   const out = [];
+  const revs = specRevisions(product, itemCol);
   for (const r of DATA.trend[product]) {
     const raw = r[itemCol];
     if (raw === null || raw === undefined) continue;
@@ -984,7 +1004,7 @@ function wacRows(product, itemCol) {
     // 좌표/hover 를 여기서 한 번만 만들어 둔다. 타점을 누를 때마다 차트를
     // 전부 다시 그리는데, 그때마다 수만 행을 다시 훑으면 클릭이 느려진다
     out.push({ root_lot_id: r.root_lot_id, wafer_id: r.wafer_id,
-               _x: r.tkout_time, _val: val, _lim: rowLimits(r, itemCol),
+               _x: r.tkout_time, _val: val, _lim: limitsAt(revs, r.tkout_time),
                _cd: [r.root_lot_id, r.wafer_id, formatHoverTime(r.tkout_time),
                      r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt],
                _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id) });
@@ -1115,7 +1135,11 @@ function wacDrawChart(entry) {
   }
   // 관리선 계단은 DC OCAP 차트와 같은 함수로 그린다
   const annotations = [];
-  addLimitSteps(traces, annotations, wacRows(state.product, itemCol));
+  const wr = wacRows(state.product, itemCol);
+  const xs0 = wr.map(r => r._x);
+  addLimitSteps(traces, annotations, specRevisions(state.product, itemCol),
+                xs0.length ? xs0.reduce((a,b)=>a<b?a:b) : undefined,
+                xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
   Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
   div.on("plotly_click", (ev) => {
@@ -1188,11 +1212,10 @@ function renderWac() {
     box.appendChild(el("div", { class: "wac-chart-title", text: itemCol }));
     // 관리선은 trend 에 item 별 컬럼으로 있다. 하나도 없으면 그 item 은
     // OUT 판정을 할 수 없으므로 전부 회색으로만 그려진다
-    const rows0 = DATA.trend[state.product];
-    const hasLim = rows0.length > 0 &&
-      LIMIT_COLS.some(w => rows0[0][limitCol(itemCol, w)] !== undefined);
-    if (!hasLim) box.appendChild(el("div", { class: "wac-nolimit",
-      text: "관리선 컬럼이 없습니다 (trend 에 " + itemCol + "_usl 등이 없음)" }));
+    if (!specRevisions(state.product, itemCol).length) {
+      box.appendChild(el("div", { class: "wac-nolimit",
+        text: "관리선 없음 (spec 에 " + itemCol + " 이 없습니다)" }));
+    }
     const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);
