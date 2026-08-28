@@ -1,6 +1,6 @@
 """OCAP hold dashboard.
 
-Left: the selected product's hold list (dc_uly / dc_sol / dc_tts),
+Left: the selected product's hold list (uly_dc / sol_dc / tts_dc),
 grouped to one row per lot_id, newest first, single-row selectable,
 with a ULY/SOL/TTS switch.
 Right (top 2/3): scatter of one measurement item across that product's
@@ -16,7 +16,7 @@ merged into dc -- comment, then owner and code -- shown read-only.
 DATA PREP (mock — stands in for the real pull, which can't be shared
 here). Replace this whole section with the real company-system pull;
 it only has to end up with pull_data() returning these six dataframes:
-dc_uly / dc_sol / dc_tts and uly_trend / sol_trend / tts_trend.
+uly_dc / sol_dc / tts_dc and uly_trend / sol_trend / tts_trend.
 
 Keep the pull inside pull_data() rather than at module level: Streamlit
 re-runs this file top to bottom on every click, so module-level code
@@ -361,17 +361,17 @@ def pull_data():
     sol_trend = generate_probe_df("SOL")
     tts_trend = generate_probe_df("TTS")
 
-    dc_uly = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
-    dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
-    dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
+    uly_dc = generate_dc_for_product("ULY", uly_trend, n_rows=50, seed=201)
+    sol_dc = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
+    tts_dc = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
-    spec_uly = generate_spec_for_product("ULY", uly_trend)
-    spec_sol = generate_spec_for_product("SOL", sol_trend)
-    spec_tts = generate_spec_for_product("TTS", tts_trend)
+    uly_spec = generate_spec_for_product("ULY", uly_trend)
+    sol_spec = generate_spec_for_product("SOL", sol_trend)
+    tts_spec = generate_spec_for_product("TTS", tts_trend)
 
-    return (dc_uly, dc_sol, dc_tts,
+    return (uly_dc, sol_dc, tts_dc,
             uly_trend, sol_trend, tts_trend,
-            spec_uly, spec_sol, spec_tts)
+            uly_spec, sol_spec, tts_spec)
 
 
 # ======================================================================
