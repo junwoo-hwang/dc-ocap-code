@@ -509,11 +509,23 @@ function addLimitSteps(traces, annotations, rows) {
   const sorted = rows.slice().sort((a, b) => (xOf(a) < xOf(b) ? -1 : 1));
   const x = sorted.map(xOf);
   for (const which of LIMIT_COLS) {
-    const y = sorted.map(r => r._lim[which]);
-    if (!y.some(v => v !== null && Number.isFinite(v))) continue;
+    // 값이 바뀌는 지점만 남긴다. 행마다 점을 찍으면 두세 값짜리 선이
+    // 수천 점이 되어, 정작 데이터보다 관리선이 무거워진다
+    const px = [], py = [];
+    let prev;
+    for (let i = 0; i < sorted.length; i++) {
+      const v = sorted[i]._lim[which];
+      if (v === null || !Number.isFinite(v)) continue;
+      if (px.length === 0 || v !== prev) { px.push(x[i]); py.push(v); prev = v; }
+    }
+    if (!px.length) continue;
+    if (px[px.length - 1] !== x[x.length - 1]) {   // 오른쪽 끝까지 끌고 간다
+      px.push(x[x.length - 1]); py.push(py[py.length - 1]);
+    }
+    const y = py;
     const [color, label] = LIMIT_LINE_STYLE[which];
     traces.push({
-      type: "scatter", x, y, mode: "lines", name: label,
+      type: "scatter", x: px, y: py, mode: "lines", name: label,
       line: { color, dash: "dash", width: 1, shape: "hv" },
       hoverinfo: "skip", showlegend: false,
     });
