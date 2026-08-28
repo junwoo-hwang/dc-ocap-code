@@ -263,37 +263,21 @@ async function loadData() {
   const parsed = JSON.parse(await new Response(stream).text());
   for (const p of Object.keys(parsed.dc)) parsed.dc[p] = expandColumnar(parsed.dc[p]);
   for (const p of Object.keys(parsed.trend)) parsed.trend[p] = expandColumnar(parsed.trend[p]);
-  for (const p of Object.keys(parsed.spec || {})) parsed.spec[p] = expandColumnar(parsed.spec[p]);
   return parsed;
 }
 
 const META_TREND_COLS = ["root_lot_id","wafer_id","tkout_time","probe_card_id","eqp_id","lot_type","rw_cnt"];
-// 관리선은 DATA.spec 에 (root_lot_id, wafer_id, item_id) 로 들어 있다.
-// 적용 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 점마다
-// 그 wafer 에 적용된 값을 찾아 쓴다. (app.py 의 spec_lookup 과 동일)
+// 관리선은 trend 안에 item1_ucl / item1_usl ... 로 측정값 옆에 붙어 있다.
+// 적용 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 각 행이
+// 그때 유효했던 값을 들고 있다. (app.py 의 limit_col 과 동일)
 const LIMIT_COLS = ["ucl","lcl","usl","lsl"];
 const LIMIT_LINE_STYLE = { ucl:["blue","UCL"], lcl:["blue","LCL"],
                            usl:["red","USL"],  lsl:["red","LSL"] };
-const EMPTY_LIMITS = { ucl:null, lcl:null, usl:null, lsl:null };
-
-const _specMaps = {};
-function specMap(product) {
-  if (_specMaps[product]) return _specMaps[product];
-  const m = new Map();
-  for (const r of (DATA.spec && DATA.spec[product]) || []) {
-    const key = normLot(r.root_lot_id) + "||" + normWafer(r.wafer_id)
-              + "||" + String(r.item_id).trim().toLowerCase();
-    const o = {};
-    for (const w of LIMIT_COLS) o[w] = toFloat(r[w]);
-    m.set(key, o);
-  }
-  _specMaps[product] = m;
-  return m;
-}
-function rowLimits(product, r, itemCol) {
-  const key = normLot(r.root_lot_id) + "||" + normWafer(r.wafer_id)
-            + "||" + String(itemCol).trim().toLowerCase();
-  return specMap(product).get(key) || EMPTY_LIMITS;
+function limitCol(itemCol, which) { return itemCol + "_" + which; }
+function rowLimits(r, itemCol) {
+  const o = {};
+  for (const w of LIMIT_COLS) o[w] = toFloat(r[limitCol(itemCol, w)]);
+  return o;
 }
 const LEGEND_FIELD_OPTIONS = {
   "없음 (기본)": null,
@@ -551,7 +535,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     const val = Number(raw);
     if (!Number.isFinite(val)) continue;
     // 이 점이 측정될 때 유효했던 관리선을 같이 들고 다닌다
-    rows.push({ ...r, _val: val, _lim: rowLimits(product, r, itemCol),
+    rows.push({ ...r, _val: val, _lim: rowLimits(r, itemCol),
                 _hoverTime: formatHoverTime(r.tkout_time) });
   }
 
@@ -988,7 +972,7 @@ function wacRows(product, itemCol) {
     // 좌표/hover 를 여기서 한 번만 만들어 둔다. 타점을 누를 때마다 차트를
     // 전부 다시 그리는데, 그때마다 수만 행을 다시 훑으면 클릭이 느려진다
     out.push({ root_lot_id: r.root_lot_id, wafer_id: r.wafer_id,
-               _x: r.tkout_time, _val: val, _lim: rowLimits(product, r, itemCol),
+               _x: r.tkout_time, _val: val, _lim: rowLimits(r, itemCol),
                _cd: [r.root_lot_id, r.wafer_id, formatHoverTime(r.tkout_time),
                      r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt],
                _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id) });
@@ -1194,9 +1178,9 @@ function renderWac() {
     // OUT 판정을 할 수 없으므로 전부 회색으로만 그려진다
     const rows0 = DATA.trend[state.product];
     const hasLim = rows0.length > 0 &&
-      rows0.some(r => rowLimits(state.product, r, itemCol) !== EMPTY_LIMITS);
+      LIMIT_COLS.some(w => rows0[0][limitCol(itemCol, w)] !== undefined);
     if (!hasLim) box.appendChild(el("div", { class: "wac-nolimit",
-      text: "관리선 없음 (spec 에 이 item 이 없습니다)" }));
+      text: "관리선 컬럼이 없습니다 (trend 에 " + itemCol + "_usl 등이 없음)" }));
     const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);

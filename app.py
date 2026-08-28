@@ -128,6 +128,26 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
     end_dt = datetime(2026, 8, 12, 23, 59, 59)
     span_seconds = int((end_dt - start_dt).total_seconds())
 
+    # 규격은 시점에 따라 바뀐다. item 마다 8/1 전후 두 벌을 잡아두고, 각
+    # 측정 행에 그때 유효했던 값을 실어 보낸다. 일부 item 만 바뀌게 두어야
+    # '바뀐 경우' 와 '안 바뀐 경우' 를 둘 다 시험할 수 있다.
+    item_spec = {}
+    for i in range(n_items):
+        spread, center = cfg["spread"], cfg["center"]
+        before = {
+            "usl": round(center + rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "lsl": round(center - rng.uniform(spread * 1.5, spread * 2.5), 3),
+            "ucl": round(center + rng.uniform(spread * 0.6, spread * 1.2), 3),
+            "lcl": round(center - rng.uniform(spread * 0.6, spread * 1.2), 3),
+        }
+        if rng.random() < 0.4:
+            bump = round(rng.uniform(spread * 0.3, spread * 0.8), 3)
+            after = {**before, "usl": round(before["usl"] + bump, 3),
+                     "ucl": round(before["ucl"] + bump, 3)}
+        else:
+            after = before
+        item_spec[f"item{i + 1}"] = (before, after)
+
 
     rows = []
     for lot, wafer_id in base_wafers:
@@ -159,7 +179,11 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
                 "rw_cnt": rw,
             }
             for i in range(n_items):
-                row[f"item{i + 1}"] = round(float(values[i]), 3) if not np.isnan(values[i]) else np.nan
+                item = f"item{i + 1}"
+                row[item] = round(float(values[i]), 3) if not np.isnan(values[i]) else np.nan
+                # 그 측정 시점에 유효했던 규격을 같이 싣는다
+                for which, v in item_spec[item][1 if tkout_time >= SPEC_CHANGE else 0].items():
+                    row[limit_col(item, which)] = v
             rows.append(row)
 
     return pd.DataFrame(rows).sort_values("tkout_time").reset_index(drop=True)
@@ -167,52 +191,6 @@ def generate_probe_df(product: str, n_rows: int = 300) -> pd.DataFrame:
 
 # 규격이 한 번 상향된 날. 이 앞뒤로 값이 달라져야 차트에 계단이 생긴다.
 SPEC_CHANGE = datetime(2026, 8, 1)
-
-
-def generate_spec_for_product(product: str, trend_df: pd.DataFrame) -> pd.DataFrame:
-    """Mock spec table: one row per (root_lot_id, wafer_id, item_id).
-
-    Limits are the spec that applied to that wafer's measurement, not a
-    fixed property of the item -- a revision (say USL 80 -> 85 from Aug 1)
-    means wafers measured on either side carry different numbers, and the
-    chart draws the step rather than one flat line.
-    """
-    cfg = PRODUCT_CONFIG[product]
-    rng = np.random.default_rng(cfg["seed"] + 7)
-    item_cols = item_columns(trend_df)
-
-    base_spec = {}
-    for item in item_cols:
-        spread, center = cfg["spread"], cfg["center"]
-        before = {
-            "usl": round(center + rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "lsl": round(center - rng.uniform(spread * 1.5, spread * 2.5), 3),
-            "ucl": round(center + rng.uniform(spread * 0.6, spread * 1.2), 3),
-            "lcl": round(center - rng.uniform(spread * 0.6, spread * 1.2), 3),
-        }
-        # 일부 item 만 바뀐다: 전부 바뀌면 '안 바뀐 경우' 를, 아무것도 안
-        # 바뀌면 계단 자체를 시험하지 못한다
-        if rng.random() < 0.4:
-            bump = round(rng.uniform(spread * 0.3, spread * 0.8), 3)
-            after = {**before, "usl": round(before["usl"] + bump, 3),
-                     "ucl": round(before["ucl"] + bump, 3)}
-        else:
-            after = before
-        base_spec[item] = (before, after)
-
-    # 한 wafer 의 여러 측정(rw_cnt)은 같은 규격을 쓴다고 본다 -- 키에
-    # 시점이 없으므로 그 wafer 의 첫 측정 시점 기준으로 정한다
-    first_seen = (trend_df.groupby(["root_lot_id", "wafer_id"], observed=True)["tkout_time"]
-                  .min().reset_index())
-    rows = []
-    for _, r in first_seen.iterrows():
-        which = 1 if r["tkout_time"] >= SPEC_CHANGE else 0
-        for item in item_cols:
-            spec = base_spec[item][which]
-            rows.append({"root_lot_id": r["root_lot_id"], "wafer_id": r["wafer_id"],
-                         "item_id": item, **spec})
-    return pd.DataFrame(rows)[
-        ["root_lot_id", "wafer_id", "item_id", "ucl", "lcl", "usl", "lsl"]]
 
 
 def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 50, seed: int | None = None) -> pd.DataFrame:
@@ -357,13 +335,13 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
 
 
 def pull_data():
-    """Return dc x3, trend x3, spec x3 (ULY, SOL, TTS in that order).
+    """Return (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend).
 
-    spec_* carries the control limits: one row per
-    (root_lot_id, wafer_id, item_id) with ucl / lcl / usl / lsl. They live
-    here rather than in dc because the spec in force changes over time, so
-    a wafer measured in July and one measured in August are judged against
-    different numbers -- and the chart draws that as a step.
+    The control limits live in trend, next to the measurement, as
+    item1_ucl / item1_lcl / item1_usl / item1_lsl beside item1. They are
+    not in dc because the spec in force changes over time: a wafer
+    measured in July and one measured in August are judged against
+    different numbers, and the chart draws that as a step.
 
     Put the real company-system pull in here. It must be a function, not
     bare module-level code: Streamlit re-runs this file top to bottom on
@@ -378,13 +356,7 @@ def pull_data():
     dc_sol = generate_dc_for_product("SOL", sol_trend, n_rows=50, seed=202)
     dc_tts = generate_dc_for_product("TTS", tts_trend, n_rows=50, seed=203)
 
-    spec_uly = generate_spec_for_product("ULY", uly_trend)
-    spec_sol = generate_spec_for_product("SOL", sol_trend)
-    spec_tts = generate_spec_for_product("TTS", tts_trend)
-
-    return (dc_uly, dc_sol, dc_tts,
-            uly_trend, sol_trend, tts_trend,
-            spec_uly, spec_sol, spec_tts)
+    return dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend
 
 
 # ======================================================================
@@ -441,32 +413,31 @@ DC_HOLD_URL = "https://go/dcocap"
 # ... beside item1, because the spec in force changes over time and each row
 # has to carry the one that applied when that wafer came out of test.
 LIMIT_COLS = ("ucl", "lcl", "usl", "lsl")
-SPEC_REQUIRED = ["root_lot_id", "wafer_id", "item_id", *LIMIT_COLS]
 # trend's own columns, everything else is either an item or one of its limits
 META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time",
                    "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
 
 
+def limit_col(item_col: str, which: str) -> str:
+    """Column holding `which` limit for `item_col` -- item1 -> item1_usl."""
+    return f"{item_col}_{which}"
+
+
 def item_columns(trend_df) -> list:
-    """The measurement columns of a trend frame (everything but its metadata)."""
-    return [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
+    """The measurement columns of a trend frame.
 
-
-def spec_lookup(spec_df) -> dict:
-    """(root_lot_id, wafer_id, item_id) -> the four limits, normalized.
-
-    Keys go through norm_lot / norm_wafer for the same reason the trend
-    join does: the spec table and the trend table need not agree on padding
-    or on whether the wafer number is text or an int.
+    Everything that is not trend's own metadata and does not end in a limit
+    suffix -- so item1 counts and item1_usl does not, or the WAC grid would
+    draw a chart per limit column.
     """
-    if spec_df is None or not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
-        return {}
-    out = {}
-    cols = [c for c in LIMIT_COLS if c in spec_df.columns]
-    for r in spec_df.itertuples(index=False):
-        key = (norm_lot(r.root_lot_id), norm_wafer(r.wafer_id),
-               str(r.item_id).strip().lower())
-        out[key] = {c: to_float(getattr(r, c)) for c in cols}
+    out = []
+    for c in trend_df.columns:
+        name = str(c)
+        if name in META_TREND_COLS:
+            continue
+        if any(name.endswith("_" + w) for w in LIMIT_COLS):
+            continue
+        out.append(c)
     return out
 
 
@@ -676,8 +647,7 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def check_data(product_dc: dict, trend_frames: dict,
-               spec_frames: dict | None = None) -> tuple[list[str], list[str]]:
+def check_data(product_dc: dict, trend_frames: dict) -> tuple[list[str], list[str]]:
     """Return (fatal, warnings) about what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
@@ -743,97 +713,36 @@ def check_data(product_dc: dict, trend_frames: dict,
         # if one of these came back as text (e.g. a BigQuery NUMERIC that
         # round-tripped as str/Decimal). Cheap to check in full -- only 4
         # columns, unlike the per-item trend checks below.
-        # 관리선은 spec 프레임에 (root_lot_id, wafer_id, item_id) 로 있다.
-        # 없거나 안 맞아도 그 점이 회색으로 그려질 뿐이라 경고로 충분하다.
-        spec_df = spec_frames.get(product) if spec_frames else None
-        if not isinstance(spec_df, pd.DataFrame):
-            warnings.append(
-                f"spec_{product.lower()}: DataFrame 이 아닙니다 "
-                f"({type(spec_df).__name__}). 관리선 없이 그려집니다."
-            )
-        elif spec_df.empty:
-            warnings.append(f"spec_{product.lower()}: 비어 있습니다. 관리선 없이 그려집니다.")
-        else:
-            missing = [c for c in SPEC_REQUIRED if c not in spec_df.columns]
-            if missing:
-                problems.append(f"spec_{product.lower()}: 컬럼 없음 -> {', '.join(missing)}")
-            else:
-                bad_lim = [f"{c}({n}개)" for c in LIMIT_COLS
-                           if (n := spec_df[c].map(
-                               lambda v: to_float(v) is None and pd.notna(v)).sum())]
-                if bad_lim:
-                    warnings.append(
-                        f"spec_{product.lower()}: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
-                        f"해당 선은 안 그려집니다. float 로 변환하세요."
-                    )
-                # trend 의 (lot, wafer, item) 이 spec 에 있는가
-                if not trend_df.empty:
-                    have = spec_lookup(spec_df)
-                    want, miss = 0, 0
-                    for item_col in item_columns(trend_df):
-                        k = str(item_col).strip().lower()
-                        for l, w in zip(trend_df["root_lot_id"], trend_df["wafer_id"]):
-                            want += 1
-                            if (norm_lot(l), norm_wafer(w), k) not in have:
-                                miss += 1
-                    if miss == want:
-                        problems.append(
-                            f"spec_{product.lower()}: trend 의 "
-                            f"(root_lot_id, wafer_id, item_id) 가 하나도 매칭되지 않습니다."
-                        )
-                    elif miss:
-                        warnings.append(
-                            f"spec_{product.lower()}: {miss:,}/{want:,} 개 측정에 관리선이 "
-                            f"없습니다 (해당 점은 회색으로만 그려짐)."
-                        )
-
-        # dc.item_id must name a real column in that product's trend
-        # (case-insensitively -- resolve_item_col handles the difference)
-        if "item_id" in dc_df.columns and not dc_df.empty:
-            all_items = set(dc_df["item_id"])
-            unknown = sorted(
-                str(i) for i in all_items if resolve_item_col(trend_df, i) is None
-            )
-            if unknown and len(unknown) == len(all_items):
-                # 하나도 안 맞으면 컬럼명 규칙 자체가 어긋난 것 (배선 실수)
-                problems.append(
-                    f"dc_{product.lower()}: item_id 가 {product.lower()}_trend 의 "
-                    f"컬럼과 하나도 매칭되지 않습니다. dc 예시 {unknown[:5]}, "
-                    f"trend 컬럼 예시 {[str(c) for c in trend_df.columns[:5]]}"
-                )
-            elif unknown:
-                # 일부만 없는 것은 흔한 일이고, 그 item 을 고르면 화면이
-                # "매칭되는 trend 데이터를 찾지 못했습니다" 를 직접 띄운다
+        # 관리선은 trend 에 item 별로 붙어 있다 (item1_usl 등). 없으면 그
+        # item 은 관리선 없이 회색으로만 그려질 뿐이라 경고로 충분하다.
+        if not trend_df.empty:
+            missing_lim, bad_lim = [], []
+            for item_col in item_columns(trend_df):
+                for which in LIMIT_COLS:
+                    col = limit_col(item_col, which)
+                    if col not in trend_df.columns:
+                        missing_lim.append(col)
+                        continue
+                    n_bad = trend_df[col].map(
+                        lambda v: to_float(v) is None and pd.notna(v)).sum()
+                    if n_bad:
+                        bad_lim.append(f"{col}({n_bad}개)")
+            if len(missing_lim) == len(item_columns(trend_df)) * len(LIMIT_COLS):
                 warnings.append(
-                    f"dc_{product.lower()}: item_id {unknown[:5]} 이(가) "
-                    f"{product.lower()}_trend 의 컬럼에 없습니다 "
-                    f"(총 {len(unknown)}/{len(all_items)}종, 해당 item 은 차트가 안 뜸)."
+                    f"{product.lower()}_trend: 관리선 컬럼이 하나도 없습니다 "
+                    f"(item1_usl 같은 컬럼). 모든 점이 회색으로만 그려집니다."
+                )
+            elif missing_lim:
+                warnings.append(
+                    f"{product.lower()}_trend: 관리선 컬럼 없음 -> {missing_lim[:6]}"
+                    f" (총 {len(missing_lim)}개). 해당 선은 안 그려집니다."
+                )
+            if bad_lim:
+                warnings.append(
+                    f"{product.lower()}_trend: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:5]}."
+                    f" 해당 선은 안 그려집니다. float 로 변환하세요."
                 )
 
-        # a hold finds its wafer by the (root_lot_id, wafer_id) pair. The
-        # dtypes may differ -- norm_lot/norm_wafer absorb that -- so what
-        # matters is whether the normalized pairs actually line up.
-        pair_cols = {"root_lot_id", "wafer_id"}
-        if pair_cols <= set(dc_df.columns) and pair_cols <= set(trend_df.columns) and not dc_df.empty:
-            trend_pairs = set(zip(trend_df["root_lot_id"].map(norm_lot),
-                                  trend_df["wafer_id"].map(norm_wafer)))
-            dc_pairs = set(zip(dc_df["root_lot_id"].map(norm_lot),
-                               dc_df["wafer_id"].map(norm_wafer)))
-            missing = dc_pairs - trend_pairs
-            if len(missing) == len(dc_pairs):
-                problems.append(
-                    f"dc_{product.lower()}: (root_lot_id, wafer_id) 가 "
-                    f"{product.lower()}_trend 에서 하나도 매칭되지 않습니다. "
-                    f"dc 예시 {sorted(missing)[:3]}"
-                )
-            elif missing:
-                # 일부만 없는 것: 그 wafer 만 빨간 점이 안 찍히고 나머지는
-                # 정상이다. bad_pairs 는 단순 집합 조회라 죽지도 않는다.
-                warnings.append(
-                    f"dc_{product.lower()}: {len(missing)}/{len(dc_pairs)} 건의 "
-                    f"(root_lot_id, wafer_id) 가 {product.lower()}_trend 에 없습니다 "
-                    f"(해당 hold 는 빨간 점이 안 찍힘). 예시 {sorted(missing)[:3]}"
-                )
     return fatal, warnings
 
 
@@ -846,14 +755,12 @@ def check_data(product_dc: dict, trend_frames: dict,
 @st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
 def load_data():
     frames = pull_data()
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = frames
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
     problems, warnings = check_data(
         {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts},
         {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
-        {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts},
     )
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
@@ -956,7 +863,7 @@ def add_limit_steps(fig, times, lim: dict) -> None:
 
 
 def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
-                   legend_field: str | None, spec: dict,
+                   legend_field: str | None,
                    chart_height: int, focus_pair: tuple | None = None) -> go.Figure:
     """Scatter one measurement item over time.
 
@@ -982,14 +889,12 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     # limits come from the row, not from one number for the whole chart: the
     # spec in force changes over time, so each point is judged against the
     # one that applied when it was measured
-    item_key = str(item_id).strip().lower()
-    keys = [(norm_lot(l), norm_wafer(w), item_key)
-            for l, w in zip(plot_df["root_lot_id"], plot_df["wafer_id"])]
-    lim = {
-        which: pd.Series([(spec.get(k) or {}).get(which) for k in keys],
-                         index=plot_df.index, dtype="float64")
-        for which in LIMIT_COLS
-    }
+    lim = {}
+    for which in LIMIT_COLS:
+        col = limit_col(item_id, which)
+        lim[which] = (pd.to_numeric(plot_df[col], errors="coerce")
+                      if col in plot_df.columns
+                      else pd.Series(np.nan, index=plot_df.index, dtype="float64"))
     # match on the pair (wafer numbers 1-25 repeat across lots), and
     # normalize both sides: dc and the trend table need not agree on how
     # a lot id is padded or whether the wafer number is text or an int
@@ -1131,15 +1036,10 @@ def show_dc_ocap():
     must be the first streamlit command, so it doesn't belong in here.
     """
     (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts,
      data_loaded_at, problems, data_warnings) = load_data()
 
     trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
     product_dc = {"ULY": dc_uly, "TTS": dc_tts, "SOL": dc_sol}
-    # (root_lot_id, wafer_id, item_id) -> 관리선. 차트마다 새로 만들면
-    # 클릭할 때마다 spec 전체를 다시 훑게 되므로 여기서 한 번만 만든다
-    spec_lookups = {p: spec_lookup(d) for p, d in
-                    (("ULY", spec_uly), ("SOL", spec_sol), ("TTS", spec_tts))}
 
     if problems:
         st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -1438,7 +1338,6 @@ def show_dc_ocap():
 
                     fig = build_scatter(
                         tdf, item_col, bad_pairs, str(lot_id), legend_field,
-                        spec_lookups.get(product, {}),
                         chart_height=TREND_HEIGHT - 150, focus_pair=chart_focus_pair,
                     )
                     fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
@@ -1628,19 +1527,17 @@ def _columns(df: pd.DataFrame) -> dict:
 
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = pull_data()
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = pull_data()
 
     product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
     # a broken dc_ocap.html. Warnings are printed but must not stop the
     # build: this runs hourly and uploads to S3, so failing over a few
     # wafers missing from trend would freeze the portal on a stale report.
-    problems, warnings = check_data(product_dc, product_trend, product_spec)
+    problems, warnings = check_data(product_dc, product_trend)
     if problems:
         raise SystemExit(
             "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
@@ -1656,11 +1553,6 @@ def build_dc_ocap_html() -> Path:
             p: item_columns(product_trend[p])
             for p in product_trend
         },
-        # 관리선. 브라우저에서 (lot||wafer||item) 키로 조회한다
-        "spec": {p: _columns(product_spec[p][SPEC_REQUIRED])
-                 if isinstance(product_spec[p], pd.DataFrame)
-                 and not product_spec[p].empty else {}
-                 for p in product_spec},
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")

@@ -148,26 +148,8 @@ def check_columns(product_dc, product_trend):
                  "이 제품은 그 조건이 빠진 채로 동작합니다.")
 
 
-def check_spec_shapes(product_spec):
-    """관리선 프레임. 없거나 비면 차트가 전부 회색으로만 그려진다."""
-    for name, df in product_spec.items():
-        if not isinstance(df, pd.DataFrame):
-            print(f"  spec_{name.lower():4s}: !! DataFrame 이 아님 ({type(df).__name__})")
-            note(1, f"spec_{name.lower()} 가 DataFrame 이 아님")
-            continue
-        missing = [c for c in app.SPEC_REQUIRED if c not in df.columns]
-        print(f"  spec_{name.lower():4s}: {len(df):>7,} 행"
-              + ("   << 비어 있음!" if df.empty else "")
-              + (f"   !! 컬럼 없음 -> {missing}" if missing else ""))
-        if missing:
-            note(1, f"spec_{name.lower()} 에 필수 컬럼이 없음", f"없는 컬럼: {missing}")
-        elif df.empty:
-            note(2, f"spec_{name.lower()} 가 비어 있음",
-                 "관리선이 없으므로 CL OUT / SL OUT 판정이 안 되고 전부 회색으로 그려집니다.")
-
-
-def check_check_data(product_dc, product_trend, product_spec):
-    result = safe("check_data()", app.check_data, product_dc, product_trend, product_spec)
+def check_check_data(product_dc, product_trend):
+    result = safe("check_data()", app.check_data, product_dc, product_trend)
     if result is None:
         return
     problems, warnings = result
@@ -511,27 +493,22 @@ def main():
               "(조회 권한 / 쿼리 문법 / 접속 정보 등).")
         return
 
-    if not isinstance(frames, (tuple, list)) or len(frames) != 9:
+    if not isinstance(frames, (tuple, list)) or len(frames) != 6:
         n = len(frames) if hasattr(frames, "__len__") else "?"
-        print(f"!! 9개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
-        print("   순서: dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,")
-        print("         spec_uly, spec_sol, spec_tts")
-        print("   spec_* 는 (root_lot_id, wafer_id, item_id, ucl, lcl, usl, lsl) 입니다.")
+        print(f"!! 6개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
+        print("   순서: dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend")
         return
 
-    (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
-     spec_uly, spec_sol, spec_tts) = frames
+    dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend = frames
     product_dc = {"ULY": dc_uly, "SOL": dc_sol, "TTS": dc_tts}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    product_spec = {"ULY": spec_uly, "SOL": spec_sol, "TTS": spec_tts}
     safe("1단계", check_shapes, product_dc, product_trend)
-    safe("1단계(spec)", check_spec_shapes, product_spec)
 
     head("2. 컬럼 이름 확인 (대시보드가 요구하는 것 대비)")
     safe("2단계", check_columns, product_dc, product_trend)
 
     head("3. check_data() 결과 (이게 걸리면 화면에 에러가 떴어야 함)")
-    safe("3단계", check_check_data, product_dc, product_trend, product_spec)
+    safe("3단계", check_check_data, product_dc, product_trend)
 
     head("4. hold_time / rw_cnt / status 값 확인  << 조용히 틀리는 원인")
     safe("4단계", check_key_columns, product_dc)
