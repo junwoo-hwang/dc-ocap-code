@@ -770,9 +770,13 @@ def check_data(product_dc: dict, trend_frames: dict,
                 problems.append(f"spec_{product.lower()}: 컬럼 없음 -> {', '.join(missing)}")
             else:
                 if not pd.api.types.is_datetime64_any_dtype(spec_df["from_time"]):
+                    n_bad = pd.to_datetime(spec_df["from_time"], errors="coerce").isna().sum()
                     warnings.append(
                         f"spec_{product.lower()}: from_time 이 날짜형이 아닙니다 "
-                        f"({spec_df['from_time'].dtype}). pd.to_datetime() 으로 변환하세요."
+                        f"({spec_df['from_time'].dtype})"
+                        + (f", 그 중 {n_bad}개는 날짜로 읽히지도 않습니다" if n_bad else "")
+                        + ". pd.to_datetime() 으로 변환하세요 "
+                        "(변환은 자동으로도 하지만, 읽히지 않는 값은 그 개정이 통째로 빠집니다)."
                     )
                 bad_lim = [f"{c}({n}개)" for c in LIMIT_COLS
                            if (n := spec_df[c].map(
@@ -1590,6 +1594,15 @@ def _columns(df: pd.DataFrame) -> dict:
     return {col: [_clean(v) for v in df[col]] for col in df.columns}
 
 
+def _spec_for_export(spec_df) -> pd.DataFrame:
+    """spec 을 브라우저로 보낼 모양으로: 필요한 컬럼만, from_time 은 datetime."""
+    if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
+        return pd.DataFrame(columns=SPEC_REQUIRED)
+    out = spec_df[SPEC_REQUIRED].copy()
+    out["from_time"] = pd.to_datetime(out["from_time"], errors="coerce")
+    return out.dropna(subset=["from_time"]).sort_values(["item_id", "from_time"])
+
+
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
     (dc_uly, dc_sol, dc_tts, uly_trend, sol_trend, tts_trend,
@@ -1620,12 +1633,13 @@ def build_dc_ocap_html() -> Path:
             p: item_columns(product_trend[p])
             for p in product_trend
         },
-        # 관리선 개정 이력. from_time 은 브라우저가 문자열로 비교할 수 있게
-        # ISO 로 넘긴다 (_clean 이 Timestamp 를 isoformat 으로 바꿔준다)
-        "spec": {p: _columns(product_spec[p][SPEC_REQUIRED])
-                 if isinstance(product_spec[p], pd.DataFrame)
-                 and not product_spec[p].empty else {}
-                 for p in product_spec},
+        # 관리선 개정 이력. from_time 은 반드시 datetime 으로 맞춰서 넘긴다:
+        # 브라우저는 tkout_time 과 문자열로 비교하는데, tkout_time 은 항상
+        # isoformat("...T...") 이라 from_time 이 "2026-08-01 01:00:00" 처럼
+        # 공백 구분 문자열로 오면 공백(0x20) < "T"(0x54) 때문에 규격이 바뀐
+        # 당일 측정에 이전 규격이 적용된다. 여기서 한 번 변환해 두면 어떤
+        # 형식으로 들어와도 양쪽이 같은 표기가 된다.
+        "spec": {p: _columns(_spec_for_export(product_spec[p])) for p in product_spec},
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
