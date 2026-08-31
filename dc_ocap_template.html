@@ -165,6 +165,48 @@
   table.wac-stats-table td { text-align: right; padding: 1px 7px 1px 0; }
   table.wac-stats-table td.up { color: #d33; font-weight: 700; }
   table.wac-stats-table td.new { color: #b45309; font-weight: 700; }
+  /* 통계의 각 줄/막대는 누르면 아래 차트를 그 item 하나로 좁힌다 */
+  table.wac-stats-table tbody tr[data-item], table.wac-stats-table tr[data-item] {
+    cursor: pointer; }
+  table.wac-stats-table tr[data-item]:hover td { background: #f1f5f9; }
+
+  .wac-legend-all { display: flex; justify-content: flex-end; align-items: center;
+                    gap: 6px; margin-top: 4px; font-size: 0.78rem; color: #667085; }
+  .wac-legend-all select, .wac-chart-legend {
+    font-size: 0.75rem; padding: 1px 4px; border: 1px solid #d0d3d9;
+    border-radius: 4px; background: #fff; }
+  .wac-chart-head { display: flex; align-items: center; justify-content: space-between;
+                    gap: 6px; margin-bottom: 2px; }
+  .wac-chart-head .wac-chart-title { margin-bottom: 0; min-width: 0;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 월별 건수 팝업 */
+  .modal { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45);
+           display: flex; align-items: center; justify-content: center; z-index: 50; }
+  /* display:flex 가 브라우저 기본 [hidden]{display:none} 을 이기기 때문에
+     반드시 따로 꺼야 한다. 안 그러면 닫혀 있는 동안에도 화면 전체를 덮은
+     채로 남아서 아래 클릭이 하나도 안 먹는다 */
+  .modal[hidden] { display: none; }
+  .modal-box { background: #fff; border-radius: 10px; min-width: 320px;
+               max-width: min(560px, 92vw); max-height: 72vh;
+               display: flex; flex-direction: column;
+               box-shadow: 0 12px 32px rgba(15, 23, 42, 0.25); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between;
+                gap: 12px; padding: 10px 12px; border-bottom: 1px solid #e2e8f0;
+                font-weight: 700; font-size: 0.95rem; }
+  .modal-head button { border: none; background: none; cursor: pointer;
+                       font-size: 1rem; color: #667085; padding: 0 4px; }
+  .modal-head button:hover { color: #d33; }
+  .modal-body { padding: 8px 12px 12px; overflow: auto; }
+  .modal-body table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  .modal-body th { text-align: left; color: #667085; font-weight: 600;
+                   padding: 4px 8px 4px 0; border-bottom: 1px solid #e2e8f0;
+                   position: sticky; top: 0; background: #fff; }
+  .modal-body th:last-child, .modal-body td:last-child { text-align: right; }
+  .modal-body td { padding: 3px 8px 3px 0; border-bottom: 1px solid #f1f3f5; }
+  .modal-body tr[data-item] { cursor: pointer; }
+  .modal-body tr[data-item]:hover td { background: #f1f5f9; }
+  .modal-note { font-size: 0.78rem; color: #888; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -257,6 +299,12 @@
       </div>
       <div class="right">
         <div class="wac-stamp">(Latest Data : __GENERATED_AT__)</div>
+        <!-- 아래 차트 전부의 legend 를 한 번에 바꾼다. 차트마다 따로 바꾸는
+             것은 각 차트 제목 옆에 하나씩 더 있다. -->
+        <div class="wac-legend-all">
+          <label for="wacLegendAll">전체 legend</label>
+          <select id="wacLegendAll"></select>
+        </div>
       </div>
     </div>
     <!-- OCAP(hold) 요약. 아래 차트는 trend 를 보는 자리라 여기만 dc 를
@@ -300,6 +348,19 @@
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
     <div id="wacEmpty" class="info-box" hidden></div>
+  </div>
+
+  <!-- 월별 건수 막대를 누르면 그 달의 item 별 내역을 여기 띄운다.
+       다른 통계는 눌렀을 때 아래 차트를 그 item 하나로 좁히는 것으로
+       충분하지만, 월별 건수는 item 이 여럿이라 그럴 수가 없다. -->
+  <div id="wacModal" class="modal" hidden>
+    <div class="modal-box">
+      <div class="modal-head">
+        <span id="wacModalTitle"></span>
+        <button type="button" id="wacModalClose" title="닫기 (Esc)">✕</button>
+      </div>
+      <div class="modal-body" id="wacModalBody"></div>
+    </div>
   </div>
 </div>
 
@@ -403,6 +464,9 @@ const HOVER_TEMPLATE =
 const HOVER_TEMPLATE_OUT =
   HOVER_TEMPLATE.replace("<extra></extra>", "") +
   "<br>%{customdata[7]}<extra></extra>";
+// 시간축은 '월-일' 만 쓴다 (08-21). 기본값은 구간 길이에 따라 연도나 월
+// 이름이 섞여 나와서, 차트를 여러 개 늘어놓으면 축마다 표기가 달라진다.
+const TIME_TICK_FORMAT = "%m-%d";
 const LIMIT_COLORS = { scrap: "red", control: "blue" };
 const CATEGORY_COLORS = [
   "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
@@ -418,6 +482,8 @@ const state = {
   page: "dcocap",          // "dcocap" | "wac"
   wacSelected: null,       // {rootLotId, waferId} -- 모든 WAC 차트에 동시 적용
   wacSearch: "",
+  wacLegend: null,          // WAC 차트 전체 legend (null = 없음)
+  wacLegendByItem: {},      // 차트마다 따로 고른 것이 있으면 그게 이긴다
   selectedLotId: null,
   selectedRwCnt: null,
   itemIdxByKey: {},
@@ -740,7 +806,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
                 xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
 
   const layout = {
-    xaxis: { title: { text: "tkout_time" } },
+    xaxis: { title: { text: "tkout_time" }, tickformat: TIME_TICK_FORMAT },
     yaxis: { title: { text: itemCol } },
     legend: { title: { text: legendField || "Legend" }, font: { size: 10 }, itemsizing: "constant", tracegroupgap: 0 },
     shapes: [], annotations,
@@ -1189,7 +1255,11 @@ function wacRows(product, itemCol) {
                _x: r.tkout_time, _val: val, _lim: limitsAt(revs, r.tkout_time),
                _cd: [r.root_lot_id, r.wafer_id, formatHoverTime(r.tkout_time),
                      r.probe_card_id, r.eqp_id, r.lot_type, r.rw_cnt],
-               _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id) });
+               _lot: normLot(r.root_lot_id), _wf: normWafer(r.wafer_id),
+               // legend 로 나눌 때 쓸 값들. 여기서 한 번 담아두면 legend 를
+               // 바꿀 때마다 원본 행을 다시 훑지 않아도 된다
+               _leg: { probe_card_id: r.probe_card_id, eqp_id: r.eqp_id,
+                       lot_type: r.lot_type, rw_cnt: String(r.rw_cnt) } });
   }
   _wacRowCache.set(key, out);
   return out;
@@ -1241,11 +1311,12 @@ function wacGroups(product, itemCol) {
   return { g, byLot };
 }
 
-// 선택 표시는 '덧그리기' 로 한다. 바탕 3개(회색/CL/SL)는 한 번 그리고
-// 끝이고, 그 위에 같은 lot 과 고른 타점만 작은 트레이스로 얹는다.
+// 선택 표시는 '덧그리기' 로 한다. 바탕(회색/CL/SL)은 한 번 그리고 끝이고,
+// 그 위에 같은 lot 과 고른 타점만 작은 트레이스로 얹는다.
 // 바탕 배열(수천 점)을 클릭마다 갈아끼우면 SVG 든 WebGL 이든 느리다 --
 // 실제로 바뀌는 건 lot 하나, wafer 하나 분량뿐이다.
-const WAC_OV_LOT = 3, WAC_OV_SEL = 4;
+// 덧그림의 자리(index)는 entry.ovLot / entry.ovSel 에 적어 둔다. legend 를
+// 고르면 배경이 여러 트레이스로 쪼개져 자리가 달라지기 때문이다.
 
 function wacOverlays(entry, sel) {
   const empty = { x: [], y: [], color: [], size: [] };
@@ -1270,8 +1341,10 @@ function wacOverlays(entry, sel) {
 
 function wacLayout(itemCol, annotations) {
   return {
-    xaxis: { title: { text: "tkout_time" } },
-    yaxis: { title: { text: itemCol } },
+    // 축 제목을 안 쓴다. item_id 는 바로 위 상자 제목에 있고, 30자짜리
+    // 이름이 세로로 서면 차트 폭을 그만큼 잡아먹는다
+    xaxis: { tickformat: TIME_TICK_FORMAT },
+    yaxis: { automargin: true },
     legend: { font: { size: 9 }, itemsizing: "constant", tracegroupgap: 0 },
     shapes: [], annotations,
     margin: { t: 24, b: 34, l: 52, r: 12 },
@@ -1283,6 +1356,26 @@ function wacLayout(itemCol, annotations) {
 // 그려진 차트들. 클릭 때 restyle 대상이자, 스크롤로 뒤늦게 그려지는
 // 차트에 현재 선택을 그대로 입히기 위한 목록이기도 하다.
 let wacCharts = [];
+
+// 이 차트에 적용할 legend. 차트마다 따로 고른 게 있으면 그게 이기고,
+// 없으면 오른쪽 위 '전체 legend' 를 따른다.
+function wacLegendField(itemCol) {
+  const own = state.wacLegendByItem[itemCol];
+  return own === undefined ? state.wacLegend : own;
+}
+
+// legend 고르는 <select> 하나. 전체용과 차트용이 같은 목록을 쓴다.
+function legendSelect(current, onChange, cls) {
+  const sel = el("select", cls ? { class: cls } : {});
+  for (const label of Object.keys(LEGEND_FIELD_OPTIONS)) {
+    const opt = el("option", { text: label });
+    opt.value = label;
+    if (LEGEND_FIELD_OPTIONS[label] === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", () => onChange(LEGEND_FIELD_OPTIONS[sel.value]));
+  return sel;
+}
 
 function wacDrawChart(entry) {
   if (entry.drawn) return;
@@ -1301,20 +1394,59 @@ function wacDrawChart(entry) {
   // 벗어난 타점(CL/SL)에만 조치 내역을 붙인다. 회색 배경 타점은 수천 개라
   // 거기까지 붙이면 hover 문자열만 쓸데없이 몇 배가 된다.
   const dispo = wacDispo(state.product, itemCol);
-  const traces = [WAC_TREND, WAC_CL, WAC_SL].map(i => ({
+  const outCd = (rows) => rows.map(r =>
+    r._cd.concat([dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD]));
+  const scatter = (rows, extra) => ({
     // scattergl(WebGL) 은 여기서 쓰면 안 된다. 브라우저는 WebGL 컨텍스트를
     // 16개 안팎까지만 살려두는데 이 화면은 차트가 20개를 넘어서, 넘어가는
     // 순간 "Too many active WebGL contexts" 와 함께 먼저 그린 차트가 통째로
     // 비어버린다. 속도는 스크롤에 맞춘 지연 렌더와 restyle 로 확보한다.
-    type: "scatter",
-    x: groups[i].map(r => r._x), y: groups[i].map(r => r._val),
-    mode: "markers", name: names[i], legendrank: ranks[i],
-    marker: { color: colors[i], size: WAC_SIZE },
-    customdata: i === WAC_TREND
-      ? groups[i].map(r => r._cd)
-      : groups[i].map(r => r._cd.concat([dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD])),
-    hovertemplate: i === WAC_TREND ? HOVER_TEMPLATE : HOVER_TEMPLATE_OUT,
-  }));
+    type: "scatter", mode: "markers",
+    x: rows.map(r => r._x), y: rows.map(r => r._val),
+    ...extra,
+  });
+
+  const legendField = wacLegendField(itemCol);
+  const traces = [];
+  if (legendField === null) {
+    traces.push(scatter(groups[WAC_TREND], {
+      name: names[WAC_TREND], legendrank: ranks[WAC_TREND],
+      marker: { color: colors[WAC_TREND], size: WAC_SIZE },
+      customdata: groups[WAC_TREND].map(r => r._cd),
+      hovertemplate: HOVER_TEMPLATE,
+    }));
+  } else {
+    // legend 를 고르면 배경(회색)만 그 값으로 나눠 칠한다. CL/SL 은 색이
+    // 곧 판정이라 그대로 둔다 -- DC OCAP 차트도 같은 규칙이다.
+    const buckets = new Map();
+    for (const r of groups[WAC_TREND]) {
+      const key = r._leg[legendField];
+      let a = buckets.get(key);
+      if (!a) buckets.set(key, a = []);
+      a.push(r);
+    }
+    let i = 0;
+    for (const [key, rows] of Array.from(buckets).sort((a, b) =>
+        String(a[0]) < String(b[0]) ? -1 : 1)) {
+      traces.push(scatter(rows, {
+        name: key, legendrank: 1000 + i,
+        marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE },
+        customdata: rows.map(r => r._cd), hovertemplate: HOVER_TEMPLATE,
+      }));
+      i += 1;
+    }
+  }
+  for (const g of [WAC_CL, WAC_SL]) {
+    traces.push(scatter(groups[g], {
+      name: names[g], legendrank: ranks[g],
+      marker: { color: colors[g], size: WAC_SIZE },
+      customdata: outCd(groups[g]), hovertemplate: HOVER_TEMPLATE_OUT,
+    }));
+  }
+  // 덧그림 두 개는 항상 맨 뒤 두 자리다. legend 를 고르면 앞쪽 트레이스
+  // 개수가 달라지므로 자리를 고정 상수로 둘 수 없어, 그린 뒤에 적어둔다.
+  entry.ovLot = traces.length;
+  entry.ovSel = traces.length + 1;
   const [lotOv, hitOv] = wacOverlays(entry, state.wacSelected);
   for (const ov of [lotOv, hitOv]) {
     traces.push({
@@ -1333,6 +1465,10 @@ function wacDrawChart(entry) {
   Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
   bindReverseDragReset(div);
+  // 한 번만 건다. legend 를 바꿔 다시 그릴 때 또 걸면 핸들러가 쌓여서,
+  // 한 번 누른 게 두 번 처리되고 선택이 켜졌다 꺼져 아무 일도 안 한다.
+  if (div._wacClickBound) return;
+  div._wacClickBound = true;
   div.on("plotly_click", (ev) => {
     const pt = ev.points && ev.points[0];
     if (!pt || !pt.customdata) return;
@@ -1346,13 +1482,22 @@ function wacDrawChart(entry) {
   });
 }
 
+// legend 를 바꾼 차트 하나만 다시 그린다. 옆 차트 20여 개까지 새로 그리면
+// 고르개를 한 번 건드릴 때마다 화면이 멎는다.
+function wacRedrawChart(itemCol) {
+  const e = wacCharts.find(c => c.itemCol === itemCol);
+  if (!e || !e.drawn) return;
+  e.drawn = false;
+  wacDrawChart(e);
+}
+
 function wacPaintSelection(e) {
   const [lot, hit] = wacOverlays(e, state.wacSelected);
   // 바탕 3개는 건드리지 않는다. 덧그림 2개만 바꾸므로 lot 하나 분량이다
   Plotly.restyle(e.div, {
     x: [lot.x, hit.x], y: [lot.y, hit.y],
     "marker.color": [lot.color, hit.color], "marker.size": [lot.size, hit.size],
-  }, [WAC_OV_LOT, WAC_OV_SEL]);
+  }, [e.ovLot, e.ovSel]);
 }
 
 // 선택이 바뀌면 덧그림만 갈아끼운다 -- 보이는 차트부터
@@ -1396,6 +1541,15 @@ function wacStats(product) {
     add(itemMonth.get(item), month, lot);
   }
   const months = Array.from(monthLots.keys()).sort();
+  // 월별 막대를 누르면 그 달의 item 별 내역을 보여줘야 해서, 달 -> item ->
+  // lot 집합을 그대로 들고 있는다 (막대에 쓰는 건 크기뿐이다)
+  const monthItemLots = new Map();
+  for (const [item, mm] of itemMonth) {
+    for (const [month, lots] of mm) {
+      if (!monthItemLots.has(month)) monthItemLots.set(month, new Map());
+      monthItemLots.get(month).set(item, lots.size);
+    }
+  }
 
   const topItems = Array.from(itemLots, ([item, s]) => ({ item, n: s.size }))
     .sort((a, b) => b.n - a.n || (a.item < b.item ? -1 : 1)).slice(0, 5);
@@ -1421,6 +1575,7 @@ function wacStats(product) {
   return {
     months,
     monthCounts: months.map(m => monthLots.get(m).size),
+    monthItems: monthItemLots,
     topItems,
     growth: growth.slice(0, 5),
     growthMonths: months.length >= 2 ? months.slice(-2) : null,
@@ -1570,6 +1725,9 @@ function countAxis(maxValue, extra) {
 // 뒤를 한 번 더 잘라서 "LEAK_G…_…" 같은 게 된다.
 function idCell(value) { return { text: String(value), full: String(value) }; }
 
+// item 이름 칸. 그 줄을 눌러 차트를 좁힐 수 있게 표시까지 붙는다.
+function itemCell(value) { return { ...idCell(value), item: String(value) }; }
+
 // 표를 붙인 뒤에 부른다. 넘치는 칸만 한 글자씩 줄여서 딱 맞게 만든다.
 // 칸이 열댓 개뿐이라 이 정도 반복은 눈에 띄지 않는다.
 function fitCells(table) {
@@ -1610,7 +1768,10 @@ function statsTable(headers, widths, rows) {
   headers.forEach(h => head.appendChild(el("th", { text: h })));
   table.appendChild(head);
   for (const cells of rows) {
-    const tr = el("tr");
+    // item 칸이 있는 줄은 통째로 누를 수 있게 표시해 둔다 (처리는 위임)
+    const item = cells.find(c => c.item);
+    const tr = el("tr", item ? { "data-item": item.item,
+                                 title: `${item.item} — 누르면 이 item 차트만 봅니다` } : {});
     for (const c of cells) {
       const td = el("td", { text: c.text });
       if (c.cls) td.className = c.cls;
@@ -1622,6 +1783,47 @@ function statsTable(headers, widths, rows) {
     table.appendChild(tr);
   }
   return table;
+}
+
+// 통계에서 item 하나를 고르면 아래 차트를 그 item 만 남긴다. 검색창에
+// 그대로 넣는 이유: 지금 무엇으로 좁혀져 있는지 눈에 보이고, 지우면 바로
+// 원래대로 돌아온다 -- 따로 '해제' 를 만들 필요가 없다.
+function focusItem(item) {
+  closeWacModal();
+  state.wacSearch = String(item);
+  renderWac();
+  document.getElementById("wacGrid").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeWacModal() {
+  document.getElementById("wacModal").hidden = true;
+}
+
+function openMonthModal(month, s) {
+  const rows = Array.from((s.monthItems.get(month) || new Map()).entries())
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  document.getElementById("wacModalTitle").textContent =
+    `${month} OCAP 내역 · item ${rows.length}종`;
+  const body = document.getElementById("wacModalBody");
+  body.innerHTML = "";
+  if (!rows.length) {
+    body.appendChild(el("div", { class: "modal-note", text: "이 달에는 OCAP 이 없습니다." }));
+  } else {
+    const table = el("table");
+    const head = el("tr");
+    ["item", "건수(lot)"].forEach(h => head.appendChild(el("th", { text: h })));
+    table.appendChild(head);
+    for (const [item, n] of rows) {
+      const tr = el("tr", { "data-item": item, title: `${item} — 누르면 아래 차트를 이 item 으로 좁힙니다` });
+      tr.appendChild(el("td", { text: item }));
+      tr.appendChild(el("td", { text: String(n) }));
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+    body.appendChild(el("div", { class: "modal-note",
+      text: "건수는 lot_id 기준입니다. 줄을 누르면 그 item 차트만 보입니다." }));
+  }
+  document.getElementById("wacModal").hidden = false;
 }
 
 function renderWacStats() {
@@ -1651,6 +1853,10 @@ function renderWacStats() {
       yaxis: countAxis(Math.max(...s.monthCounts),
                        { title: { text: "건(lot)", font: { size: 9 } } }),
     }, { displayModeBar: false, responsive: true });
+    monthBody.on("plotly_click", (ev) => {
+      const pt = ev.points && ev.points[0];
+      if (pt) openMonthModal(String(pt.x), s);
+    });
   }
 
   // ---- OCAP TOP5 item ----
@@ -1680,6 +1886,10 @@ function renderWacStats() {
                tickvals: rows.map(r => r.item),
                ticktext: rows.map(r => shortId(r.item, 9)) },
     }, { displayModeBar: false, responsive: true });
+    itemBody.on("plotly_click", (ev) => {
+      const pt = ev.points && ev.points[0];
+      if (pt) focusItem(pt.y);      // y 는 줄이기 전 원래 item 이름
+    });
   }
 
   // ---- 전월 대비 증가율 TOP5 ----
@@ -1697,7 +1907,7 @@ function renderWacStats() {
       ["item", shortMonth(prevM), shortMonth(curM), "증가율"],
       ["44%", "14%", "14%", "28%"],
       s.growth.map(g => [
-        idCell(g.item),
+        itemCell(g.item),
         { text: String(g.prev) },
         { text: String(g.cur) },
         g.rate === null ? { text: "신규", cls: "new" }
@@ -1716,7 +1926,7 @@ function renderWacStats() {
   const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
   const rateRows = (list) => list.map(r => [
     idCell(r.who),
-    idCell(r.item),
+    itemCell(r.item),
     { text: pct(r.rate), cls: "up",
       title: `hold ${r.held}건 / 측정 ${r.measured}건` },
   ]);
@@ -1729,7 +1939,7 @@ function renderWacStats() {
   // 양쪽을 줄이는데, "…" 자체가 넓어서 줄일수록 되레 넓어지는 구간이 있다
   build("wacStatSpread", ["item", "차이", "card"], ["33%", "22%", "45%"],
     q.spread.map(r => [
-      idCell(r.item),
+      itemCell(r.item),
       // 측정 건수도 같이 보여준다. 몇십 건짜리 median 차는 대개 우연이라,
       // 이 숫자를 봐야 진짜 카드 편차인지 판단할 수 있다
       { text: r.diff.toFixed(2),
@@ -1740,6 +1950,12 @@ function renderWacStats() {
         title: `${r.hi.card} (높음) ↔ ${r.lo.card} (낮음)` },
     ]), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
 }
+
+// 차트 순서. 피벗해서 온 컬럼 순서는 대개 사전순이라 item2 가 item10 뒤로
+// 가서 뒤죽박죽으로 보인다. 숫자는 숫자로 견주고(내림차순), 그래야 30개가
+// 늘어서도 눈으로 따라갈 수 있다.
+const _collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+function compareItemsDesc(a, b) { return _collator.compare(String(b), String(a)); }
 
 function renderWac() {
   renderWacStats();
@@ -1753,7 +1969,8 @@ function renderWac() {
 
   const q = state.wacSearch.trim().toLowerCase();
   const items = (DATA.itemCols[state.product] || [])
-    .filter(c => !q || String(c).toLowerCase().includes(q));
+    .filter(c => !q || String(c).toLowerCase().includes(q))
+    .sort(compareItemsDesc);
 
   const grid = document.getElementById("wacGrid");
   const empty = document.getElementById("wacEmpty");
@@ -1779,7 +1996,14 @@ function renderWac() {
 
   items.forEach(itemCol => {
     const box = el("div", { class: "wac-chart" });
-    box.appendChild(el("div", { class: "wac-chart-title", text: itemCol }));
+    const head = el("div", { class: "wac-chart-head" });
+    head.appendChild(el("div", { class: "wac-chart-title", text: itemCol, title: itemCol }));
+    // 이 차트만의 legend. 고르면 그 차트는 전체 설정을 따르지 않는다
+    head.appendChild(legendSelect(wacLegendField(itemCol), (field) => {
+      state.wacLegendByItem[itemCol] = field;
+      wacRedrawChart(itemCol);
+    }, "wac-chart-legend"));
+    box.appendChild(head);
     // 관리선은 trend 에 item 별 컬럼으로 있다. 하나도 없으면 그 item 은
     // OUT 판정을 할 수 없으므로 전부 회색으로만 그려진다
     if (!specRevisions(state.product, itemCol).length) {
@@ -1840,6 +2064,33 @@ document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
   // 제품은 두 페이지가 같이 쓴다 -- 여기서 바꾸고 DC OCAP 으로 가도 그대로
   state.product = btn.dataset.val;
   state.wacSelected = null;
+  renderWac();
+});
+// 통계 표의 줄을 누르면 그 item 만 남긴다 (표는 다시 그려지므로 위임으로)
+document.querySelector(".wac-stats-row").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-item]");
+  if (tr) focusItem(tr.dataset.item);
+});
+// 팝업: ✕ / 바깥 클릭 / Esc 로 닫고, 줄을 누르면 그 item 으로 좁힌다
+document.getElementById("wacModalClose").addEventListener("click", closeWacModal);
+document.getElementById("wacModal").addEventListener("click", (e) => {
+  if (e.target.id === "wacModal") closeWacModal();      // 바깥(어두운 곳)만
+  const tr = e.target.closest("tr[data-item]");
+  if (tr) focusItem(tr.dataset.item);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeWacModal();
+});
+// 전체 legend: 차트마다 따로 고른 것들까지 싹 지우고 하나로 맞춘다
+const wacLegendAll = document.getElementById("wacLegendAll");
+for (const label of Object.keys(LEGEND_FIELD_OPTIONS)) {
+  const opt = el("option", { text: label });
+  opt.value = label;
+  wacLegendAll.appendChild(opt);
+}
+wacLegendAll.addEventListener("change", () => {
+  state.wacLegend = LEGEND_FIELD_OPTIONS[wacLegendAll.value];
+  state.wacLegendByItem = {};
   renderWac();
 });
 document.getElementById("wacSearch").addEventListener("input", (e) => {
