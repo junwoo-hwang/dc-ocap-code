@@ -1553,6 +1553,14 @@ function wacApplySelection() {
 // 퍼져 있어서 행을 세면 같은 건이 수십 번 잡힌다. 같은 lot 이 한 달에 두
 // 번 걸리면(rework) 그 달에는 한 건으로 센다.
 function wacStats(product) {
+  // dc 의 item_id 와 trend 의 컬럼 이름은 대소문자/공백이 다를 수 있다.
+  // 여기서 trend 쪽 이름으로 맞춰 두지 않으면, 통계는 dc 이름으로 만들어지고
+  // 아래 차트는 trend 이름으로 찾게 되어 눌러도 아무 차트도 안 뜬다.
+  const itemByKey = new Map((DATA.itemCols[product] || [])
+    .map(c => [String(c).trim().toLowerCase(), String(c)]));
+  const resolveItem = (id) =>
+    itemByKey.get(String(id).trim().toLowerCase()) || String(id);
+
   const monthLots = new Map();       // "YYYY-MM" -> Set(lot_id)
   const itemLots = new Map();        // item_id   -> Set(lot_id)
   const itemMonth = new Map();       // item_id   -> Map(month -> Set(lot_id))
@@ -1565,7 +1573,7 @@ function wacStats(product) {
     const month = String(r.hold_time || "").slice(0, 7);
     if (month.length !== 7) continue;          // hold_time 이 비었거나 이상한 행
     const lot = String(r.lot_id);
-    const item = String(r.item_id);
+    const item = resolveItem(r.item_id);
     add(monthLots, month, lot);
     add(itemLots, item, lot);
     if (!itemMonth.has(item)) itemMonth.set(item, new Map());
@@ -1690,17 +1698,24 @@ function wacQualityStats(product) {
   }
 
   const rateTop = (field) => {
-    const out = [];
+    // item 하나에 한 줄만 남긴다. 그 item 에서 제일 나쁜 설비를 올리는 것이고,
+    // 그래야 다섯 줄이 다섯 item 이 된다 -- 안 그러면 설비 하나가 여러 줄을
+    // 차지해서 다섯 줄인데 item 은 두어 개뿐인 표가 나온다.
+    const best = new Map();
     for (const [key, n] of measured[field]) {
       if (n < MIN_MEASURED) continue;
       const h = held[field].get(key) || 0;
       if (!h) continue;                    // 0% 를 줄 세워봐야 의미가 없다
       const cut = key.lastIndexOf("||");
-      out.push({ who: key.slice(0, cut), item: key.slice(cut + 2),
-                 rate: h / n, held: h, measured: n });
+      const row = { who: key.slice(0, cut), item: key.slice(cut + 2),
+                    rate: h / n, held: h, measured: n };
+      const prev = best.get(row.item);
+      if (!prev || row.rate > prev.rate || (row.rate === prev.rate && row.held > prev.held)) {
+        best.set(row.item, row);
+      }
     }
-    out.sort((a, b) => b.rate - a.rate || b.held - a.held);
-    return out.slice(0, 5);
+    return Array.from(best.values())
+      .sort((a, b) => b.rate - a.rate || b.held - a.held).slice(0, 5);
   };
 
   // card 별 median 을 내고 최대-최소. 카드가 둘 이상 있어야 '차이' 가 있다
@@ -1782,10 +1797,11 @@ function focusItems(items, label, legendField) {
   closeWacModal();
   state.wacFilter = { label, items: Array.from(new Set(items.map(String))) };
   state.wacSearch = "";
-  if (legendField !== undefined) {
-    state.wacLegend = legendField;
-    state.wacLegendByItem = {};
-  }
+  // legend 는 언제나 이 칸이 정하는 값으로 맞춘다. 설비 칸이 아니면 null,
+  // 즉 기본(회색 + CL/SL) 이다 -- 앞서 누른 칸의 legend 가 남아 있으면
+  // OCAP TOP5 를 눌렀는데 설비별로 갈라져 보인다.
+  state.wacLegend = legendField === undefined ? null : legendField;
+  state.wacLegendByItem = {};
   renderWac();
 }
 
@@ -1902,7 +1918,6 @@ function renderWacStats() {
     // 달이라 연도까지 적을 필요가 없어서 "7월" 로 줄인다.
     const shortMonth = (m) => Number(m.slice(5, 7)) + "월";
     const [prevM, curM] = s.growthMonths;
-    armPanelFocus("wacStatGrowth", "전월 대비 증가율 TOP5", s.growth.map(g => g.item));
     growthBody.appendChild(statsTable(
       ["item", shortMonth(prevM), shortMonth(curM), "증가율"],
       s.growth.map(g => [
@@ -1912,6 +1927,7 @@ function renderWacStats() {
         g.rate === null ? { text: "신규", cls: "new" }
                         : { text: "+" + Math.round(g.rate * 100) + "%", cls: "up" },
       ])));
+    armPanelFocus("wacStatGrowth", "전월 대비 증가율 TOP5", s.growth.map(g => g.item));
   }
 
   // ---- 오른쪽: 설비 / probe card ----
@@ -1930,15 +1946,15 @@ function renderWacStats() {
       title: `hold ${r.held}건 / 측정 ${r.measured}건` },
   ]);
   const noSample = `측정 ${MIN_MEASURED}건 이상인 조합 중 hold 가 있는 것이 없습니다.`;
+  // 반드시 build 뒤에 arm 한다. build 안의 slot() 이 칸을 비우면서 '누르면
+  // 볼 것' 도 같이 지우기 때문에, 먼저 달아두면 조용히 사라진다.
+  // 설비별 순위를 눌렀으면 차트도 설비별로 갈라 보여준다.
   build("wacStatEqp", ["eqp", "item", "OCAP률"], rateRows(q.eqp), noSample);
-  build("wacStatCard", ["card", "item", "OCAP률"], rateRows(q.card), noSample);
-  // 설비별 순위를 눌렀으면 차트도 설비별로 갈라 보여준다
   if (q.eqp.length) armPanelFocus("wacStatEqp", "eqp별 OCAP률 TOP5",
                                   q.eqp.map(r => r.item), "eqp_id");
+  build("wacStatCard", ["card", "item", "OCAP률"], rateRows(q.card), noSample);
   if (q.card.length) armPanelFocus("wacStatCard", "probe card별 OCAP률 TOP5",
                                    q.card.map(r => r.item), "probe_card_id");
-  if (q.spread.length) armPanelFocus("wacStatSpread", "card간 median 차 TOP5",
-                                     q.spread.map(r => r.item), "probe_card_id");
   build("wacStatSpread", ["item", "차이", "card"],
     q.spread.map(r => [
       itemCell(r.item),
@@ -1950,6 +1966,8 @@ function renderWacStats() {
       { text: `${r.hi.card}↔${r.lo.card}`,
         title: `${r.hi.card} (높음) ↔ ${r.lo.card} (낮음)` },
     ]), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
+  if (q.spread.length) armPanelFocus("wacStatSpread", "card간 median 차 TOP5",
+                                     q.spread.map(r => r.item), "probe_card_id");
 }
 
 // 차트 순서. 피벗해서 온 컬럼 순서는 대개 사전순이라 item2 가 item10 뒤로
@@ -1989,6 +2007,12 @@ function renderWac() {
     .filter(c => !q || String(c).toLowerCase().includes(q))
     .sort(compareItemsDesc);
   renderWacFilterChip(items.length);
+  // 통계 칸이 legend 를 바꿔 놓기도 하므로, 위쪽 고르개도 지금 값에 맞춘다.
+  // 차트는 갈라져 있는데 고르개는 '없음' 이면 왜 이렇게 보이는지 알 수 없다.
+  const legendAll = document.getElementById("wacLegendAll");
+  const label = Object.keys(LEGEND_FIELD_OPTIONS)
+    .find(k => LEGEND_FIELD_OPTIONS[k] === state.wacLegend);
+  if (label !== undefined && legendAll.value !== label) legendAll.value = label;
 
   const grid = document.getElementById("wacGrid");
   const empty = document.getElementById("wacEmpty");
@@ -2005,8 +2029,15 @@ function renderWac() {
   grid.innerHTML = "";
   if (!items.length) {
     empty.hidden = false;
-    empty.textContent = q ? `"${state.wacSearch}" 와 맞는 item 이 없습니다.`
-                          : "이 제품의 trend 에 item 컬럼이 없습니다.";
+    // 왜 비었는지를 정확히 말한다. 통계에서 넘어온 item 이 trend 에 없으면
+    // "trend 에 item 컬럼이 없다" 는 엉뚱한 안내가 되어, 이름이 안 맞는
+    // 것인지 데이터가 없는 것인지 알 수가 없다.
+    empty.textContent = state.wacFilter
+      ? `${state.wacFilter.label} 의 item 이 이 제품 trend 에 없습니다`
+        + ` (${state.wacFilter.items.slice(0, 2).join(", ")}${
+            state.wacFilter.items.length > 2 ? " 외" : ""}).`
+      : q ? `"${state.wacSearch}" 와 맞는 item 이 없습니다.`
+          : "이 제품의 trend 에 item 컬럼이 없습니다.";
     document.getElementById("wacSelected").textContent = "";
     return;
   }
@@ -2082,7 +2113,13 @@ document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
   // 제품은 두 페이지가 같이 쓴다 -- 여기서 바꾸고 DC OCAP 으로 가도 그대로
   state.product = btn.dataset.val;
   state.wacSelected = null;
-  state.wacFilter = null;      // 다른 제품의 item 목록은 여기서 뜻이 없다
+  // 다른 제품의 item 목록은 여기서 뜻이 없다. legend 도 같이 푼다 -- 통계를
+  // 누르면 legend 까지 바뀌는데, 제품만 바꿨을 때 그게 남아 있으면 왜 설비별로
+  // 갈라져 보이는지 알 수가 없다.
+  state.wacFilter = null;
+  state.wacLegend = null;
+  state.wacLegendByItem = {};
+  document.getElementById("wacLegendAll").selectedIndex = 0;
   renderWac();
 });
 // 통계 칸을 누르면 그 칸의 item 들을 아래에 편다 (칸은 다시 그려지므로 위임)
