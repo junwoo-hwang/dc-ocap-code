@@ -128,6 +128,15 @@
   .wac-search { margin-bottom: 0; flex: 1; }
   .wac-stamp { font-size: 0.8rem; color: #888; text-align: right; }
   /* 가로 2개 고정, 세로로는 item 수만큼 */
+  .wac-filter { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px;
+                font-size: 0.8rem; color: #1a56db; }
+  .wac-filter button { font-size: 0.75rem; padding: 1px 8px; cursor: pointer;
+                       border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff;
+                       color: #1a56db; }
+  .wac-filter button:hover { background: #e0e7ff; }
+  .wac-filter[hidden] { display: none; }
+  .wac-stat.clickable { cursor: pointer; }
+  .wac-stat.clickable:hover { border-color: #94a3b8; background: #f8fafc; }
   .wac-selected { font-size: 0.85rem; color: #d33; font-weight: 600; min-height: 1.2em; }
   .wac-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
@@ -143,26 +152,39 @@
   .wac-stat-title { font-size: 0.78rem; font-weight: 700; color: #444;
                     margin-bottom: 2px; white-space: nowrap;
                     overflow: hidden; text-overflow: ellipsis; }
-  /* overflow:hidden 은 마지막 방어선이다. item_id 가 길면 표가 칸 밖으로
-     삐져나가 옆 칸 글자와 겹쳐 버린다 (아래 table-layout:fixed 로 이미
-     막지만, 예상 못 한 내용이 와도 칸을 넘지는 않게 해 둔다) */
-  .wac-stats-body { height: 132px; overflow: hidden; }
+  /* 이름을 줄이지 않는다. item_id 는 30자까지 오는데 줄여 놓으면 결국
+     무엇인지 알 수 없어서, 칸은 제일 긴 글자에 맞춰 벌어지게 두고 넘치는
+     만큼은 가로 스크롤로 넘겨 본다. 세로는 잠근다 -- 아래 차트가 밀린다. */
+  .wac-stats-body { height: 132px; overflow-x: auto; overflow-y: hidden; }
   .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px;
                      overflow-wrap: anywhere; }
-  /* table-layout:fixed + width:100% 라야 칸 너비를 우리가 정한 대로 쓴다.
-     기본(auto)은 내용에 맞춰 표를 늘려서, 긴 item_id 하나가 표 전체를
-     칸 밖으로 밀어낸다. 넘치는 글자는 말줄임표로 자르고 전체 값은
-     title(마우스 올리면 뜨는 것)에 남긴다. */
-  table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem;
-                          width: 100%; table-layout: fixed; }
-  table.wac-stats-table th, table.wac-stats-table td {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 스크롤 막대를 늘 보이게 둔다. 안 그러면 옆에 더 있다는 걸 모른다 */
+  .wac-stats-body::-webkit-scrollbar { height: 8px; }
+  .wac-stats-body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  .wac-stats-body::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+  table.wac-stats-table { border-collapse: separate; border-spacing: 0;
+                          font-size: 0.78rem; width: max-content; }
+  table.wac-stats-table th, table.wac-stats-table td { white-space: nowrap; }
+  /* 마지막 칸(순위를 가르는 값)은 오른쪽에 붙여 둔다. 이름이 길어 가로로
+     밀려도 정작 봐야 할 숫자는 늘 보이게. */
+  table.wac-stats-table th:last-child, table.wac-stats-table td:last-child {
+    position: sticky; right: 0; background: #fff; padding-left: 10px;
+    box-shadow: -6px 0 6px -6px rgba(15, 23, 42, 0.18); }
   table.wac-stats-table th { text-align: right; color: #666; font-weight: 600;
                              padding: 1px 7px 2px 0; border-bottom: 1px solid #e2e8f0; }
   table.wac-stats-table th:first-child, table.wac-stats-table td:first-child { text-align: left; }
   /* 5행이면 132px 안에 아슬아슬하게 들어간다. 폰트가 조금만 커져도 잘리므로
      행 간격을 좁혀 여유를 둔다 */
   table.wac-stats-table td { text-align: right; padding: 1px 7px 1px 0; }
+  /* 건수 뒤에 깔리는 막대. 글자는 그대로 두고 배경만 칠한다 */
+  /* position 을 주지 않는다. 이 칸은 마지막 칸이라 위에서 sticky 가 걸려
+     있는데, relative 로 덮어쓰면 오른쪽 고정이 풀려 스크롤 밖으로 나간다
+     (sticky 도 positioned 라서 ::before 의 기준은 그대로 이 칸이다) */
+  table.wac-stats-table td.bar { min-width: 64px; text-align: right; }
+  table.wac-stats-table td.bar::before {
+    content: ""; position: absolute; left: 0; top: 3px; bottom: 3px;
+    width: var(--bar, 0%); background: #f4b3ab; border-radius: 2px; z-index: 0; }
+  table.wac-stats-table td.bar { isolation: isolate; }
   table.wac-stats-table td.up { color: #d33; font-weight: 700; }
   table.wac-stats-table td.new { color: #b45309; font-weight: 700; }
   /* 통계의 각 줄/막대는 누르면 아래 차트를 그 item 하나로 좁힌다 */
@@ -345,6 +367,7 @@
         </div>
       </div>
     </div>
+    <div id="wacFilter" class="wac-filter" hidden></div>
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
     <div id="wacEmpty" class="info-box" hidden></div>
@@ -806,8 +829,10 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
                 xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
 
   const layout = {
-    xaxis: { title: { text: "tkout_time" }, tickformat: TIME_TICK_FORMAT },
-    yaxis: { title: { text: itemCol } },
+    // 축 제목은 안 쓴다. item 이름은 차트 위 안내줄에 이미 있고, 긴 이름이
+    // 세로로 서면 차트 폭을 그만큼 먹는다
+    xaxis: { tickformat: TIME_TICK_FORMAT },
+    yaxis: { automargin: true },
     legend: { title: { text: legendField || "Legend" }, font: { size: 10 }, itemsizing: "constant", tracegroupgap: 0 },
     shapes: [], annotations,
     margin: { t: 30, b: 30, l: 55, r: 20 },
@@ -1409,39 +1434,45 @@ function wacDrawChart(entry) {
   const legendField = wacLegendField(itemCol);
   const traces = [];
   if (legendField === null) {
+    // 기본: 회색 배경 + CL OUT / SL OUT
     traces.push(scatter(groups[WAC_TREND], {
       name: names[WAC_TREND], legendrank: ranks[WAC_TREND],
       marker: { color: colors[WAC_TREND], size: WAC_SIZE },
       customdata: groups[WAC_TREND].map(r => r._cd),
       hovertemplate: HOVER_TEMPLATE,
     }));
+    for (const g of [WAC_CL, WAC_SL]) {
+      traces.push(scatter(groups[g], {
+        name: names[g], legendrank: ranks[g],
+        marker: { color: colors[g], size: WAC_SIZE },
+        customdata: outCd(groups[g]), hovertemplate: HOVER_TEMPLATE_OUT,
+      }));
+    }
   } else {
-    // legend 를 고르면 배경(회색)만 그 값으로 나눠 칠한다. CL/SL 은 색이
-    // 곧 판정이라 그대로 둔다 -- DC OCAP 차트도 같은 규칙이다.
+    // legend 를 고르면 CL/SL 구분은 걷어내고 고른 값으로만 나눈다. 한 화면에
+    // 두 가지 색 규칙이 겹치면 무슨 색이 무슨 뜻인지 알 수 없다 -- 관리선을
+    // 벗어났는지는 점선 위아래로 여전히 보인다.
     const buckets = new Map();
-    for (const r of groups[WAC_TREND]) {
-      const key = r._leg[legendField];
-      let a = buckets.get(key);
-      if (!a) buckets.set(key, a = []);
-      a.push(r);
+    for (const g of [WAC_TREND, WAC_CL, WAC_SL]) {
+      for (const r of groups[g]) {
+        const key = String(r._leg[legendField]);
+        let a = buckets.get(key);
+        if (!a) buckets.set(key, a = []);
+        a.push(r);
+      }
     }
     let i = 0;
     for (const [key, rows] of Array.from(buckets).sort((a, b) =>
-        String(a[0]) < String(b[0]) ? -1 : 1)) {
+        _collator.compare(a[0], b[0]))) {
+      // 어느 무리에 속하든 조치 내역은 붙여둔다. CL/SL 색이 없어진 만큼
+      // hover 로라도 그 점이 어떤 건이었는지 알 수 있어야 한다.
       traces.push(scatter(rows, {
         name: key, legendrank: 1000 + i,
         marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE },
-        customdata: rows.map(r => r._cd), hovertemplate: HOVER_TEMPLATE,
+        customdata: outCd(rows), hovertemplate: HOVER_TEMPLATE_OUT,
       }));
       i += 1;
     }
-  }
-  for (const g of [WAC_CL, WAC_SL]) {
-    traces.push(scatter(groups[g], {
-      name: names[g], legendrank: ranks[g],
-      marker: { color: colors[g], size: WAC_SIZE },
-      customdata: outCd(groups[g]), hovertemplate: HOVER_TEMPLATE_OUT,
-    }));
   }
   // 덧그림 두 개는 항상 맨 뒤 두 자리다. legend 를 고르면 앞쪽 트레이스
   // 개수가 달라지므로 자리를 고정 상수로 둘 수 없어, 그린 뒤에 적어둔다.
@@ -1590,16 +1621,6 @@ function wacStats(product) {
 const MIN_MEASURED = 20;    // OCAP률: (eqp|card, item) 측정 건수
 const MIN_PER_CARD = 10;    // median 차: card 하나당 측정 건수
 
-// 긴 이름을 줄일 때는 가운데를 덜어낸다. item_id 는 30자까지 가고
-// 구분되는 부분이 뒤에 오는 경우가 많아서(..._01 / ..._02), 앞만 남기면
-// 서로 다른 item 이 같은 이름으로 보인다. 전체 값은 title 에 남겨 둔다.
-function shortId(value, max) {
-  const s = String(value);
-  if (s.length <= max) return s;
-  const head = Math.ceil((max - 1) / 2);
-  return s.slice(0, head) + "…" + s.slice(s.length - (max - 1 - head));
-}
-
 function median(sorted) {
   const m = sorted.length >> 1;
   return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
@@ -1712,6 +1733,9 @@ const WAC_STATS_LAYOUT = {
   bargap: 0.55,
 };
 
+// "2026-07" -> "7월". 견주는 달은 늘 이웃한 달이라 연도는 군더더기다.
+function monthLabel(m) { return Number(String(m).slice(5, 7)) + "월"; }
+
 // 건수 축은 정수만 찍는다. 건수가 한 자리일 때 plotly 기본 눈금은 0.5,
 // 1.5 를 넣는데, 'lot 0.5건' 은 없는 수다.
 function countAxis(maxValue, extra) {
@@ -1719,65 +1743,29 @@ function countAxis(maxValue, extra) {
            ...(maxValue <= 10 ? { dtick: 1 } : {}), ...extra };
 }
 
-// 줄일 수 있는 칸(이름이 들어가는 칸)임을 표시해서 넘겨준다. 몇 글자까지
-// 보이는지는 여기서 정하지 않는다 -- 아래 fitCells 가 실제 칸 너비를 재서
-// 정한다. 글자 수를 미리 어림하면 폰트나 칸 너비가 조금만 달라도 CSS 가
-// 뒤를 한 번 더 잘라서 "LEAK_G…_…" 같은 게 된다.
-function idCell(value) { return { text: String(value), full: String(value) }; }
+// item 이름 칸. 그 줄을 눌러 아래 차트를 좁힐 수 있게 표시가 붙는다.
+function itemCell(value) { return { text: String(value), item: String(value) }; }
 
-// item 이름 칸. 그 줄을 눌러 차트를 좁힐 수 있게 표시까지 붙는다.
-function itemCell(value) { return { ...idCell(value), item: String(value) }; }
-
-// 표를 붙인 뒤에 부른다. 넘치는 칸만 한 글자씩 줄여서 딱 맞게 만든다.
-// 칸이 열댓 개뿐이라 이 정도 반복은 눈에 띄지 않는다.
-function fitCells(table) {
-  for (const td of table.querySelectorAll("td[data-full]")) {
-    const full = td.dataset.full;
-    // "A↔B" 처럼 두 이름이 든 칸은 통째로 줄이면 가운데 화살표부터 먹혀서
-    // 한 덩어리처럼 보인다. 양쪽을 따로 줄여 화살표를 남긴다.
-    // 두 이름을 한 문자열로 이어 담으면 구분자가 이름 안에 들어올 때
-    // split 이 조용히 어긋난다. 각각 따로 담는다.
-    const pair = td.dataset.pairA ? [td.dataset.pairA, td.dataset.pairB] : null;
-    let max = (pair ? Math.max(pair[0].length, pair[1].length) : full.length);
-    while (td.scrollWidth > td.clientWidth && max > (pair ? 3 : 5)) {
-      max -= 1;
-      td.textContent = pair
-        ? shortId(pair[0], max) + "↔" + shortId(pair[1], max)
-        : shortId(full, max);
-    }
-    // 줄었을 때만 title 을 단다. 안 줄었는데 달아두면 마우스만 올려도
-    // 같은 글자가 툴팁으로 또 뜬다
-    if (td.textContent !== full && !td.title) td.title = full;
-  }
-}
-
-// 통계 표는 전부 이걸로 만든다. widths 를 반드시 받는 이유는 CSS 쪽
-// table-layout:fixed 와 짝이라서다 -- 폭을 안 주면 칸이 균등분할된다.
-// 붙이고 나서야 칸 너비를 잴 수 있으므로 둘을 한 짝으로 묶어 둔다
-function appendFitted(body, table) {
-  body.appendChild(table);
-  fitCells(table);
-}
-
-function statsTable(headers, widths, rows) {
+// 통계 표. 칸 너비는 브라우저가 내용에 맞춰 잡게 두고(줄이지 않는다),
+// 넘치면 바깥 .wac-stats-body 가 가로로 스크롤된다.
+function statsTable(headers, rows) {
   const table = el("table", { class: "wac-stats-table" });
-  const cg = el("colgroup");
-  widths.forEach(w => { const c = el("col"); c.style.width = w; cg.appendChild(c); });
-  table.appendChild(cg);
   const head = el("tr");
   headers.forEach(h => head.appendChild(el("th", { text: h })));
   table.appendChild(head);
   for (const cells of rows) {
     // item 칸이 있는 줄은 통째로 누를 수 있게 표시해 둔다 (처리는 위임)
     const item = cells.find(c => c.item);
-    const tr = el("tr", item ? { "data-item": item.item,
-                                 title: `${item.item} — 누르면 이 item 차트만 봅니다` } : {});
+    const tr = el("tr", item ? { "data-item": item.item } : {});
     for (const c of cells) {
       const td = el("td", { text: c.text });
       if (c.cls) td.className = c.cls;
       if (c.title) td.title = c.title;
-      if (c.full) td.dataset.full = c.full;
-      if (c.pair) { td.dataset.pairA = c.pair[0]; td.dataset.pairB = c.pair[1]; }
+      if (c.bar !== undefined) {
+        // 숫자 뒤에 깔리는 작은 막대. 칸 너비를 늘리지 않도록 배경으로 둔다
+        td.className = (td.className ? td.className + " " : "") + "bar";
+        td.style.setProperty("--bar", Math.round(c.bar * 100) + "%");
+      }
       tr.appendChild(td);
     }
     table.appendChild(tr);
@@ -1785,14 +1773,34 @@ function statsTable(headers, widths, rows) {
   return table;
 }
 
-// 통계에서 item 하나를 고르면 아래 차트를 그 item 만 남긴다. 검색창에
-// 그대로 넣는 이유: 지금 무엇으로 좁혀져 있는지 눈에 보이고, 지우면 바로
-// 원래대로 돌아온다 -- 따로 '해제' 를 만들 필요가 없다.
-function focusItem(item) {
+// 통계 칸을 누르면 그 칸이 말하는 item 들만 아래에 남긴다. 누른 줄 하나가
+// 아니라 그 칸의 다섯 개를 다 보여주는 이유: 순위표는 다섯을 견주라고 있는
+// 것이라, 하나만 남기면 정작 견줄 것이 사라진다.
+// legendField 를 같이 받는 건 eqp / probe card 표 때문이다 -- 설비별 순위를
+// 눌렀으면 차트도 설비별로 갈라 봐야 말이 된다.
+function focusItems(items, label, legendField) {
   closeWacModal();
-  state.wacSearch = String(item);
+  state.wacFilter = { label, items: Array.from(new Set(items.map(String))) };
+  state.wacSearch = "";
+  if (legendField !== undefined) {
+    state.wacLegend = legendField;
+    state.wacLegendByItem = {};
+  }
   renderWac();
-  document.getElementById("wacGrid").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function clearWacFilter() {
+  state.wacFilter = null;
+  renderWac();
+}
+
+// 어느 칸을 누르면 무엇을 보여줄지 그 칸에 적어둔다. 표든 차트든 눌린 자리에서
+// 가장 가까운 .wac-stat 를 찾아 이걸 읽는다.
+function armPanelFocus(bodyId, label, items, legendField) {
+  const panel = document.getElementById(bodyId).closest(".wac-stat");
+  panel._wacFocus = { label, items, legendField };
+  panel.classList.add("clickable");
+  panel.title = `누르면 아래 차트를 이 ${label} 의 item 만 보여줍니다`;
 }
 
 function closeWacModal() {
@@ -1814,7 +1822,7 @@ function openMonthModal(month, s) {
     ["item", "건수(lot)"].forEach(h => head.appendChild(el("th", { text: h })));
     table.appendChild(head);
     for (const [item, n] of rows) {
-      const tr = el("tr", { "data-item": item, title: `${item} — 누르면 아래 차트를 이 item 으로 좁힙니다` });
+      const tr = el("tr", { "data-item": item });
       tr.appendChild(el("td", { text: item }));
       tr.appendChild(el("td", { text: String(n) }));
       table.appendChild(tr);
@@ -1834,6 +1842,11 @@ function renderWacStats() {
     const b = document.getElementById(id);
     Plotly.purge(b);
     b.innerHTML = "";
+    // 이전 제품에서 달아둔 '누르면 볼 것' 도 같이 지운다
+    const panel = b.closest(".wac-stat");
+    panel._wacFocus = null;
+    panel.classList.remove("clickable");
+    panel.removeAttribute("title");
     return b;
   };
   const note = (b, text) => b.appendChild(el("div", { class: "wac-stats-empty", text }));
@@ -1849,7 +1862,10 @@ function renderWacStats() {
       hovertemplate: "%{x}<br>%{y}건<extra></extra>",
     }], {
       ...WAC_STATS_LAYOUT,
-      xaxis: { type: "category" },
+      // 눈금은 "7월" 로만. 값은 "2026-07" 그대로라 눌렀을 때 어느 해인지
+      // 헷갈릴 일이 없고, hover 에도 연도가 붙어 나온다
+      xaxis: { type: "category", tickmode: "array", tickvals: s.months,
+               ticktext: s.months.map(monthLabel) },
       yaxis: countAxis(Math.max(...s.monthCounts),
                        { title: { text: "건(lot)", font: { size: 9 } } }),
     }, { displayModeBar: false, responsive: true });
@@ -1860,36 +1876,19 @@ function renderWacStats() {
   }
 
   // ---- OCAP TOP5 item ----
+  // 막대 차트가 아니라 표다. 이름을 줄이지 않기로 한 이상 축에 30자를 세우면
+  // 왼쪽 여백이 차트를 통째로 밀어내서, 기본 화면에 막대가 아예 안 보인다.
+  // 표에 작은 막대를 같이 넣으면 이름도 다 나오고 크기도 눈에 들어온다.
   const itemBody = slot("wacStatItem");
   if (!s.topItems.length) {
     note(itemBody, "이 제품에는 집계할 OCAP 이력이 없습니다.");
   } else {
-    // 가로 막대: 1위가 위로 오도록 뒤집는다. 축 이름은 줄여서 보여주되
-    // (긴 item_id 를 그대로 두면 왼쪽 여백이 차트를 다 먹는다) y 값 자체는
-    // 원래 이름이라 서로 다른 item 이 같은 칸으로 합쳐지지 않고, hover 에는
-    // 전체 이름이 그대로 뜬다
-    const rows = s.topItems.slice().reverse();
-    Plotly.react(itemBody, [{
-      type: "bar", orientation: "h",
-      x: rows.map(r => r.n), y: rows.map(r => r.item),
-      marker: { color: "#e15241" },
-      text: rows.map(r => r.n + "건"), textposition: "auto",
-      hovertemplate: "%{y}<br>%{x}건<extra></extra>",
-    }], {
-      ...WAC_STATS_LAYOUT,
-      // 축 이름 자리(l)와 줄이는 글자 수는 짝이다. l 보다 긴 이름을 넣으면
-      // plotly 가 왼쪽 끝에서 잘라버려서 앞글자가 통째로 날아간다
-      margin: { t: 8, b: 26, l: 62, r: 24 },
-      bargap: 0.35,
-      xaxis: countAxis(rows[rows.length - 1].n),
-      yaxis: { type: "category", tickmode: "array",
-               tickvals: rows.map(r => r.item),
-               ticktext: rows.map(r => shortId(r.item, 9)) },
-    }, { displayModeBar: false, responsive: true });
-    itemBody.on("plotly_click", (ev) => {
-      const pt = ev.points && ev.points[0];
-      if (pt) focusItem(pt.y);      // y 는 줄이기 전 원래 item 이름
-    });
+    const top = s.topItems[0].n;
+    itemBody.appendChild(statsTable(["item", "건수(lot)"], s.topItems.map(r => [
+      itemCell(r.item),
+      { text: String(r.n), bar: r.n / top },
+    ])));
+    armPanelFocus("wacStatItem", "OCAP TOP5 item", s.topItems.map(r => r.item));
   }
 
   // ---- 전월 대비 증가율 TOP5 ----
@@ -1903,9 +1902,9 @@ function renderWacStats() {
     // 달이라 연도까지 적을 필요가 없어서 "7월" 로 줄인다.
     const shortMonth = (m) => Number(m.slice(5, 7)) + "월";
     const [prevM, curM] = s.growthMonths;
-    appendFitted(growthBody, statsTable(
+    armPanelFocus("wacStatGrowth", "전월 대비 증가율 TOP5", s.growth.map(g => g.item));
+    growthBody.appendChild(statsTable(
       ["item", shortMonth(prevM), shortMonth(curM), "증가율"],
-      ["44%", "14%", "14%", "28%"],
       s.growth.map(g => [
         itemCell(g.item),
         { text: String(g.prev) },
@@ -1917,27 +1916,30 @@ function renderWacStats() {
 
   // ---- 오른쪽: 설비 / probe card ----
   const q = wacQualityStats(state.product);
-  const build = (bodyId, headers, widths, rows, emptyText) => {
+  const build = (bodyId, headers, rows, emptyText) => {
     const body = slot(bodyId);
     if (!rows.length) return note(body, emptyText);
-    appendFitted(body, statsTable(headers, widths, rows));
+    body.appendChild(statsTable(headers, rows));
   };
 
   const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
   const rateRows = (list) => list.map(r => [
-    idCell(r.who),
+    { text: String(r.who) },
     itemCell(r.item),
     { text: pct(r.rate), cls: "up",
       title: `hold ${r.held}건 / 측정 ${r.measured}건` },
   ]);
   const noSample = `측정 ${MIN_MEASURED}건 이상인 조합 중 hold 가 있는 것이 없습니다.`;
-  const rateW = ["27%", "43%", "30%"];
-
-  build("wacStatEqp", ["eqp", "item", "OCAP률"], rateW, rateRows(q.eqp), noSample);
-  build("wacStatCard", ["card", "item", "OCAP률"], rateW, rateRows(q.card), noSample);
-  // card 칸은 이름 두 개가 들어가므로 제일 넓게 잡는다. 좁으면 fitCells 가
-  // 양쪽을 줄이는데, "…" 자체가 넓어서 줄일수록 되레 넓어지는 구간이 있다
-  build("wacStatSpread", ["item", "차이", "card"], ["33%", "22%", "45%"],
+  build("wacStatEqp", ["eqp", "item", "OCAP률"], rateRows(q.eqp), noSample);
+  build("wacStatCard", ["card", "item", "OCAP률"], rateRows(q.card), noSample);
+  // 설비별 순위를 눌렀으면 차트도 설비별로 갈라 보여준다
+  if (q.eqp.length) armPanelFocus("wacStatEqp", "eqp별 OCAP률 TOP5",
+                                  q.eqp.map(r => r.item), "eqp_id");
+  if (q.card.length) armPanelFocus("wacStatCard", "probe card별 OCAP률 TOP5",
+                                   q.card.map(r => r.item), "probe_card_id");
+  if (q.spread.length) armPanelFocus("wacStatSpread", "card간 median 차 TOP5",
+                                     q.spread.map(r => r.item), "probe_card_id");
+  build("wacStatSpread", ["item", "차이", "card"],
     q.spread.map(r => [
       itemCell(r.item),
       // 측정 건수도 같이 보여준다. 몇십 건짜리 median 차는 대개 우연이라,
@@ -1945,8 +1947,7 @@ function renderWacStats() {
       { text: r.diff.toFixed(2),
         title: `${r.hi.card} median ${r.hi.med.toFixed(2)} (n=${r.hi.n}) / `
                + `${r.lo.card} median ${r.lo.med.toFixed(2)} (n=${r.lo.n})` },
-      { text: `${r.hi.card}↔${r.lo.card}`, full: `${r.hi.card}↔${r.lo.card}`,
-        pair: [r.hi.card, r.lo.card],
+      { text: `${r.hi.card}↔${r.lo.card}`,
         title: `${r.hi.card} (높음) ↔ ${r.lo.card} (낮음)` },
     ]), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
 }
@@ -1956,6 +1957,20 @@ function renderWacStats() {
 // 늘어서도 눈으로 따라갈 수 있다.
 const _collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 function compareItemsDesc(a, b) { return _collator.compare(String(b), String(a)); }
+
+// 지금 무엇으로 좁혀져 있는지 한 줄로 보여주고, 거기서 바로 풀 수 있게 한다.
+// 이게 없으면 통계를 눌러 좁힌 뒤 원래대로 돌아갈 방법이 눈에 안 보인다.
+function renderWacFilterChip(shown) {
+  const box = document.getElementById("wacFilter");
+  box.innerHTML = "";
+  const f = state.wacFilter;
+  if (!f) { box.hidden = true; return; }
+  box.hidden = false;
+  box.appendChild(el("span", { text: `${f.label} · item ${shown}개만 보는 중` }));
+  const btn = el("button", { type: "button", text: "전체 보기" });
+  btn.addEventListener("click", clearWacFilter);
+  box.appendChild(btn);
+}
 
 function renderWac() {
   renderWacStats();
@@ -1968,9 +1983,12 @@ function renderWac() {
   if (search.value !== state.wacSearch) search.value = state.wacSearch;
 
   const q = state.wacSearch.trim().toLowerCase();
+  const picked = state.wacFilter ? new Set(state.wacFilter.items) : null;
   const items = (DATA.itemCols[state.product] || [])
+    .filter(c => !picked || picked.has(String(c)))
     .filter(c => !q || String(c).toLowerCase().includes(q))
     .sort(compareItemsDesc);
+  renderWacFilterChip(items.length);
 
   const grid = document.getElementById("wacGrid");
   const empty = document.getElementById("wacEmpty");
@@ -2064,19 +2082,22 @@ document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
   // 제품은 두 페이지가 같이 쓴다 -- 여기서 바꾸고 DC OCAP 으로 가도 그대로
   state.product = btn.dataset.val;
   state.wacSelected = null;
+  state.wacFilter = null;      // 다른 제품의 item 목록은 여기서 뜻이 없다
   renderWac();
 });
-// 통계 표의 줄을 누르면 그 item 만 남긴다 (표는 다시 그려지므로 위임으로)
+// 통계 칸을 누르면 그 칸의 item 들을 아래에 편다 (칸은 다시 그려지므로 위임)
 document.querySelector(".wac-stats-row").addEventListener("click", (e) => {
-  const tr = e.target.closest("tr[data-item]");
-  if (tr) focusItem(tr.dataset.item);
+  const panel = e.target.closest(".wac-stat");
+  if (!panel || !panel._wacFocus) return;
+  const f = panel._wacFocus;
+  focusItems(f.items, f.label, f.legendField);
 });
 // 팝업: ✕ / 바깥 클릭 / Esc 로 닫고, 줄을 누르면 그 item 으로 좁힌다
 document.getElementById("wacModalClose").addEventListener("click", closeWacModal);
 document.getElementById("wacModal").addEventListener("click", (e) => {
   if (e.target.id === "wacModal") closeWacModal();      // 바깥(어두운 곳)만
   const tr = e.target.closest("tr[data-item]");
-  if (tr) focusItem(tr.dataset.item);
+  if (tr) focusItems([tr.dataset.item], `${tr.dataset.item}`);
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeWacModal();
