@@ -143,9 +143,20 @@
   .wac-stat-title { font-size: 0.78rem; font-weight: 700; color: #444;
                     margin-bottom: 2px; white-space: nowrap;
                     overflow: hidden; text-overflow: ellipsis; }
-  .wac-stats-body { height: 132px; }
-  .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px; }
-  table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem; }
+  /* overflow:hidden 은 마지막 방어선이다. item_id 가 길면 표가 칸 밖으로
+     삐져나가 옆 칸 글자와 겹쳐 버린다 (아래 table-layout:fixed 로 이미
+     막지만, 예상 못 한 내용이 와도 칸을 넘지는 않게 해 둔다) */
+  .wac-stats-body { height: 132px; overflow: hidden; }
+  .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px;
+                     overflow-wrap: anywhere; }
+  /* table-layout:fixed + width:100% 라야 칸 너비를 우리가 정한 대로 쓴다.
+     기본(auto)은 내용에 맞춰 표를 늘려서, 긴 item_id 하나가 표 전체를
+     칸 밖으로 밀어낸다. 넘치는 글자는 말줄임표로 자르고 전체 값은
+     title(마우스 올리면 뜨는 것)에 남긴다. */
+  table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem;
+                          width: 100%; table-layout: fixed; }
+  table.wac-stats-table th, table.wac-stats-table td {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   table.wac-stats-table th { text-align: right; color: #666; font-weight: 600;
                              padding: 1px 7px 2px 0; border-bottom: 1px solid #e2e8f0; }
   table.wac-stats-table th:first-child, table.wac-stats-table td:first-child { text-align: left; }
@@ -1424,6 +1435,16 @@ function wacStats(product) {
 const MIN_MEASURED = 20;    // OCAP률: (eqp|card, item) 측정 건수
 const MIN_PER_CARD = 10;    // median 차: card 하나당 측정 건수
 
+// 긴 이름을 줄일 때는 가운데를 덜어낸다. item_id 는 30자까지 가고
+// 구분되는 부분이 뒤에 오는 경우가 많아서(..._01 / ..._02), 앞만 남기면
+// 서로 다른 item 이 같은 이름으로 보인다. 전체 값은 title 에 남겨 둔다.
+function shortId(value, max) {
+  const s = String(value);
+  if (s.length <= max) return s;
+  const head = Math.ceil((max - 1) / 2);
+  return s.slice(0, head) + "…" + s.slice(s.length - (max - 1 - head));
+}
+
 function median(sorted) {
   const m = sorted.length >> 1;
   return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
@@ -1543,6 +1564,66 @@ function countAxis(maxValue, extra) {
            ...(maxValue <= 10 ? { dtick: 1 } : {}), ...extra };
 }
 
+// 줄일 수 있는 칸(이름이 들어가는 칸)임을 표시해서 넘겨준다. 몇 글자까지
+// 보이는지는 여기서 정하지 않는다 -- 아래 fitCells 가 실제 칸 너비를 재서
+// 정한다. 글자 수를 미리 어림하면 폰트나 칸 너비가 조금만 달라도 CSS 가
+// 뒤를 한 번 더 잘라서 "LEAK_G…_…" 같은 게 된다.
+function idCell(value) { return { text: String(value), full: String(value) }; }
+
+// 표를 붙인 뒤에 부른다. 넘치는 칸만 한 글자씩 줄여서 딱 맞게 만든다.
+// 칸이 열댓 개뿐이라 이 정도 반복은 눈에 띄지 않는다.
+function fitCells(table) {
+  for (const td of table.querySelectorAll("td[data-full]")) {
+    const full = td.dataset.full;
+    // "A↔B" 처럼 두 이름이 든 칸은 통째로 줄이면 가운데 화살표부터 먹혀서
+    // 한 덩어리처럼 보인다. 양쪽을 따로 줄여 화살표를 남긴다.
+    // 두 이름을 한 문자열로 이어 담으면 구분자가 이름 안에 들어올 때
+    // split 이 조용히 어긋난다. 각각 따로 담는다.
+    const pair = td.dataset.pairA ? [td.dataset.pairA, td.dataset.pairB] : null;
+    let max = (pair ? Math.max(pair[0].length, pair[1].length) : full.length);
+    while (td.scrollWidth > td.clientWidth && max > (pair ? 3 : 5)) {
+      max -= 1;
+      td.textContent = pair
+        ? shortId(pair[0], max) + "↔" + shortId(pair[1], max)
+        : shortId(full, max);
+    }
+    // 줄었을 때만 title 을 단다. 안 줄었는데 달아두면 마우스만 올려도
+    // 같은 글자가 툴팁으로 또 뜬다
+    if (td.textContent !== full && !td.title) td.title = full;
+  }
+}
+
+// 통계 표는 전부 이걸로 만든다. widths 를 반드시 받는 이유는 CSS 쪽
+// table-layout:fixed 와 짝이라서다 -- 폭을 안 주면 칸이 균등분할된다.
+// 붙이고 나서야 칸 너비를 잴 수 있으므로 둘을 한 짝으로 묶어 둔다
+function appendFitted(body, table) {
+  body.appendChild(table);
+  fitCells(table);
+}
+
+function statsTable(headers, widths, rows) {
+  const table = el("table", { class: "wac-stats-table" });
+  const cg = el("colgroup");
+  widths.forEach(w => { const c = el("col"); c.style.width = w; cg.appendChild(c); });
+  table.appendChild(cg);
+  const head = el("tr");
+  headers.forEach(h => head.appendChild(el("th", { text: h })));
+  table.appendChild(head);
+  for (const cells of rows) {
+    const tr = el("tr");
+    for (const c of cells) {
+      const td = el("td", { text: c.text });
+      if (c.cls) td.className = c.cls;
+      if (c.title) td.title = c.title;
+      if (c.full) td.dataset.full = c.full;
+      if (c.pair) { td.dataset.pairA = c.pair[0]; td.dataset.pairB = c.pair[1]; }
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  return table;
+}
+
 function renderWacStats() {
   const s = wacStats(state.product);
   // 제품을 바꿀 때마다 남은 차트를 반드시 걷어낸다 (WAC 그리드와 같은 이유:
@@ -1577,7 +1658,10 @@ function renderWacStats() {
   if (!s.topItems.length) {
     note(itemBody, "이 제품에는 집계할 OCAP 이력이 없습니다.");
   } else {
-    // 가로 막대: item 이름이 길어도 안 잘린다. 1위가 위로 오도록 뒤집는다
+    // 가로 막대: 1위가 위로 오도록 뒤집는다. 축 이름은 줄여서 보여주되
+    // (긴 item_id 를 그대로 두면 왼쪽 여백이 차트를 다 먹는다) y 값 자체는
+    // 원래 이름이라 서로 다른 item 이 같은 칸으로 합쳐지지 않고, hover 에는
+    // 전체 이름이 그대로 뜬다
     const rows = s.topItems.slice().reverse();
     Plotly.react(itemBody, [{
       type: "bar", orientation: "h",
@@ -1587,9 +1671,14 @@ function renderWacStats() {
       hovertemplate: "%{y}<br>%{x}건<extra></extra>",
     }], {
       ...WAC_STATS_LAYOUT,
+      // 축 이름 자리(l)와 줄이는 글자 수는 짝이다. l 보다 긴 이름을 넣으면
+      // plotly 가 왼쪽 끝에서 잘라버려서 앞글자가 통째로 날아간다
       margin: { t: 8, b: 26, l: 62, r: 24 },
       bargap: 0.35,
-      xaxis: countAxis(rows[rows.length - 1].n), yaxis: { type: "category" },
+      xaxis: countAxis(rows[rows.length - 1].n),
+      yaxis: { type: "category", tickmode: "array",
+               tickvals: rows.map(r => r.item),
+               ticktext: rows.map(r => shortId(r.item, 9)) },
     }, { displayModeBar: false, responsive: true });
   }
 
@@ -1604,64 +1693,52 @@ function renderWacStats() {
     // 달이라 연도까지 적을 필요가 없어서 "7월" 로 줄인다.
     const shortMonth = (m) => Number(m.slice(5, 7)) + "월";
     const [prevM, curM] = s.growthMonths;
-    const table = el("table", { class: "wac-stats-table" });
-    const head = el("tr");
-    ["item", shortMonth(prevM), shortMonth(curM), "증가율"]
-      .forEach(h => head.appendChild(el("th", { text: h })));
-    table.appendChild(head);
-    for (const g of s.growth) {
-      const tr = el("tr");
-      tr.appendChild(el("td", { text: g.item }));
-      tr.appendChild(el("td", { text: String(g.prev) }));
-      tr.appendChild(el("td", { text: String(g.cur) }));
-      tr.appendChild(g.rate === null
-        ? el("td", { class: "new", text: "신규" })
-        : el("td", { class: "up", text: "+" + Math.round(g.rate * 100) + "%" }));
-      table.appendChild(tr);
-    }
-    growthBody.appendChild(table);
+    appendFitted(growthBody, statsTable(
+      ["item", shortMonth(prevM), shortMonth(curM), "증가율"],
+      ["44%", "14%", "14%", "28%"],
+      s.growth.map(g => [
+        idCell(g.item),
+        { text: String(g.prev) },
+        { text: String(g.cur) },
+        g.rate === null ? { text: "신규", cls: "new" }
+                        : { text: "+" + Math.round(g.rate * 100) + "%", cls: "up" },
+      ])));
   }
 
   // ---- 오른쪽: 설비 / probe card ----
   const q = wacQualityStats(state.product);
-
-  // 표 하나 만드는 자리. rows 는 [칸, 칸, ...] 배열과 마지막 칸의 class/title
-  const buildTable = (bodyId, headers, rows, emptyText) => {
+  const build = (bodyId, headers, widths, rows, emptyText) => {
     const body = slot(bodyId);
     if (!rows.length) return note(body, emptyText);
-    const table = el("table", { class: "wac-stats-table" });
-    const head = el("tr");
-    headers.forEach(h => head.appendChild(el("th", { text: h })));
-    table.appendChild(head);
-    for (const r of rows) {
-      const tr = el("tr");
-      r.cells.forEach((c, i) => {
-        const td = el("td", { text: c });
-        if (i === r.cells.length - 1 && r.cls) td.className = r.cls;
-        if (r.title) td.title = r.title;
-        tr.appendChild(td);
-      });
-      table.appendChild(tr);
-    }
-    body.appendChild(table);
+    appendFitted(body, statsTable(headers, widths, rows));
   };
 
   const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
-  const rateRows = (list) => list.map(r => ({
-    cells: [r.who, r.item, pct(r.rate)], cls: "up",
-    title: `hold ${r.held}건 / 측정 ${r.measured}건`,
-  }));
+  const rateRows = (list) => list.map(r => [
+    idCell(r.who),
+    idCell(r.item),
+    { text: pct(r.rate), cls: "up",
+      title: `hold ${r.held}건 / 측정 ${r.measured}건` },
+  ]);
   const noSample = `측정 ${MIN_MEASURED}건 이상인 조합 중 hold 가 있는 것이 없습니다.`;
+  const rateW = ["27%", "43%", "30%"];
 
-  buildTable("wacStatEqp", ["eqp", "item", "OCAP률"], rateRows(q.eqp), noSample);
-  buildTable("wacStatCard", ["card", "item", "OCAP률"], rateRows(q.card), noSample);
-  buildTable("wacStatSpread", ["item", "차이", "card"], q.spread.map(r => ({
-    cells: [r.item, r.diff.toFixed(2), `${r.hi.card}↔${r.lo.card}`],
-    // 측정 건수도 같이 보여준다. 몇십 건짜리 median 차는 대개 우연이라,
-    // 이 숫자를 봐야 진짜 카드 편차인지 판단할 수 있다
-    title: `${r.hi.card} median ${r.hi.med.toFixed(2)} (n=${r.hi.n}) / `
-           + `${r.lo.card} median ${r.lo.med.toFixed(2)} (n=${r.lo.n})`,
-  })), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
+  build("wacStatEqp", ["eqp", "item", "OCAP률"], rateW, rateRows(q.eqp), noSample);
+  build("wacStatCard", ["card", "item", "OCAP률"], rateW, rateRows(q.card), noSample);
+  // card 칸은 이름 두 개가 들어가므로 제일 넓게 잡는다. 좁으면 fitCells 가
+  // 양쪽을 줄이는데, "…" 자체가 넓어서 줄일수록 되레 넓어지는 구간이 있다
+  build("wacStatSpread", ["item", "차이", "card"], ["33%", "22%", "45%"],
+    q.spread.map(r => [
+      idCell(r.item),
+      // 측정 건수도 같이 보여준다. 몇십 건짜리 median 차는 대개 우연이라,
+      // 이 숫자를 봐야 진짜 카드 편차인지 판단할 수 있다
+      { text: r.diff.toFixed(2),
+        title: `${r.hi.card} median ${r.hi.med.toFixed(2)} (n=${r.hi.n}) / `
+               + `${r.lo.card} median ${r.lo.med.toFixed(2)} (n=${r.lo.n})` },
+      { text: `${r.hi.card}↔${r.lo.card}`, full: `${r.hi.card}↔${r.lo.card}`,
+        pair: [r.hi.card, r.lo.card],
+        title: `${r.hi.card} (높음) ↔ ${r.lo.card} (낮음)` },
+    ]), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
 }
 
 function renderWac() {
