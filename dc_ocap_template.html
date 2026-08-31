@@ -755,8 +755,11 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
   // 사유가 바로 그 값인 경우가 많다.
   const bounds = robustBounds(rows.filter(r => !isBad(r)).map(r => r._val));
   const hidden = rows.filter(r => !isBad(r) && isAbsurd(r._val, bounds, r._lim, false));
-  const others = rows.filter(r => !isBad(r) && r._val !== 0
-                                  && !isAbsurd(r._val, bounds, r._lim, false));
+  // 0 이라고 무조건 버리지 않는다. 5시그마 규칙이 생기기 전에는 '정확히 0 =
+  // 계측 실패' 로 봤는데, 값이 0 근처인 item(누설 같은 것)에서는 멀쩡한 값을
+  // 소리 없이 지우게 된다. 진짜 계측 실패인 0 은 어차피 5시그마 밖이라 아래
+  // 규칙에 걸리고, 걸리면 개수도 세어 화면에 적힌다.
+  const others = rows.filter(r => !isBad(r) && !isAbsurd(r._val, bounds, r._lim, false));
 
   const traces = [];
   function customdata(grp) {
@@ -1557,7 +1560,11 @@ const wacQueue = [];
 let wacDraining = false;
 
 // 화면(+여유 300px) 안에 있는가. 관찰자와 같은 기준이다.
+// 문서에서 떨어져 나간 차트를 먼저 걸러야 한다 -- 떨어진 노드는 크기가 전부
+// 0 이라 좌표만 보면 '화면 맨 위' 로 읽히고, 그러면 이미 버린 차트에 다시
+// 그리게 된다 (그리면 plotly 가 resize 핸들러를 다시 걸어 메모리가 샌다).
 function wacOnScreen(entry) {
+  if (!entry.div.isConnected) return false;
   const r = entry.div.getBoundingClientRect();
   return r.bottom > -300 && r.top < window.innerHeight + 300;
 }
@@ -2137,6 +2144,10 @@ function renderWac() {
     if (e.drawn) Plotly.purge(e.div);
     delete e.div._wacEntry;
   }
+  // 큐에 남은 일감은 전부 지금 버리는 차트에 대한 것이다. 안 비우면 방금
+  // purge 한 div 에 다시 그려서, 보이지도 않는 그림을 그리느라 화면이 멎고
+  // plotly 가 resize 핸들러를 다시 걸어 메모리가 샌다.
+  wacQueue.length = 0;
   wacCharts = [];
   grid.innerHTML = "";
   if (!items.length) {
