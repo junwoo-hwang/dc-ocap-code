@@ -1579,6 +1579,59 @@ function wacPaintSelection(e) {
   }, [e.ovLot, e.ovSel]);
 }
 
+// 차트 하나를 그리거나 다시 칠하는 데 100ms 안팎이 든다. 스크롤로 여러 개가
+// 한꺼번에 화면에 들어오면 그 일이 통째로 몰려서 스크롤이 멎는다 (실측: 타점을
+// 누른 뒤 지나온 쪽으로 되돌아갈 때 긴 작업 7회 3.6초, 최대 0.9초).
+// 그래서 큐에 넣고 한 번에 하나씩, 브라우저가 한가할 때 처리한다. 화면에
+// 보이는 차트는 클릭 즉시 칠해지므로 이 큐는 '지나온 것 따라잡기' 용이다.
+const wacQueue = [];
+let wacDraining = false;
+
+// 화면(+여유 300px) 안에 있는가. 관찰자와 같은 기준이다.
+function wacOnScreen(entry) {
+  const r = entry.div.getBoundingClientRect();
+  return r.bottom > -300 && r.top < window.innerHeight + 300;
+}
+
+function wacEnqueue(entry, kind) {
+  // 이미 같은 일이 예약돼 있으면 두 번 넣지 않는다
+  if (entry._queued === kind) return;
+  entry._queued = kind;
+  wacQueue.push({ entry, kind });
+  wacDrainSoon();
+}
+
+function wacDrainSoon() {
+  if (wacDraining || !wacQueue.length) return;
+  wacDraining = true;
+  const run = () => {
+    wacDraining = false;
+    // 스크롤 중에는 한 번에 하나만 한다 -- 차트 하나가 100ms 남짓이라
+    // 몰아서 하면 그만큼 스크롤이 멎는다. 손을 떼면 남은 것을 몰아서
+    // 끝낸다: 한 개씩 한가할 때만 하면 채워지는 데 몇 초가 걸린다
+    // (실측 6개에 4.3초, 정작 그리는 시간은 0.7초뿐이었다).
+    const budget = wacScrolling ? 0 : 60;
+    const t0 = performance.now();
+    do {
+      const job = wacQueue.shift();
+      if (!job) break;
+      job.entry._queued = null;
+      // 지금 화면에 있는지는 그 자리에서 직접 잰다. 관찰자가 알려준 값을
+      // 믿으면, 빠르게 스크롤하는 동안 갱신이 밀려 이미 화면에 들어와 있는
+      // 차트를 '아직 안 보임' 으로 판단하고 건너뛴다.
+      job.entry.visible = wacOnScreen(job.entry);
+      if (job.entry.visible) {
+        if (job.kind === "draw") wacDrawChart(job.entry);
+        else if (job.entry.drawn) { wacPaintSelection(job.entry); job.entry.dirty = false; }
+      }
+    } while (wacQueue.length && performance.now() - t0 < budget);
+    wacDrainSoon();
+  };
+  // timeout 을 둬서 계속 바쁜 화면에서도 언젠가는 반드시 처리되게 한다
+  if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 300 });
+  else setTimeout(run, 0);
+}
+
 // 선택이 바뀌면 덧그림만 갈아끼운다 -- 보이는 차트부터
 function wacApplySelection() {
   const sel = state.wacSelected;
@@ -2182,6 +2235,28 @@ function renderWac() {
   wacApplySelection();
 }
 
+// 스크롤이 멎으면 화면에 있는데 아직 안 그려진 차트를 마저 채운다.
+// 관찰자만 믿으면 구멍이 난다: 빠르게 훑고 지나가는 사이에 큐에서 걸러진
+// 차트는 이미 '보이는 중' 상태라 관찰자가 다시 알려주지 않아서, 스크롤을
+// 멈춰도 빈 칸으로 남는다.
+let _wacSweepTimer = null;
+let wacScrolling = false;
+function wacSweepSoon() {
+  wacScrolling = true;
+  clearTimeout(_wacSweepTimer);
+  _wacSweepTimer = setTimeout(() => {
+    wacScrolling = false;
+    if (state.page !== "wac") return;
+    for (const e of wacCharts) {
+      if (!wacOnScreen(e)) continue;
+      e.visible = true;
+      if (!e.drawn) wacEnqueue(e, "draw");
+      else if (e.dirty) wacEnqueue(e, "paint");
+    }
+  }, 150);
+}
+window.addEventListener("scroll", wacSweepSoon, { passive: true });
+
 // 계속 관찰한다: 처음 보일 때 그리고, 그 뒤로는 '지금 보이는지' 를 들고
 // 있다가 선택이 바뀔 때 보이는 것만 먼저 갱신하는 데 쓴다
 const wacObserver = new IntersectionObserver((entries) => {
@@ -2190,9 +2265,10 @@ const wacObserver = new IntersectionObserver((entries) => {
     if (!e) continue;
     e.visible = en.isIntersecting;
     if (!en.isIntersecting) continue;
-    wacDrawChart(e);
-    // 안 보이는 동안 선택이 바뀌었으면 이제 반영한다
-    if (e.dirty) { wacPaintSelection(e); e.dirty = false; }
+    // 곧바로 하지 않고 큐에 넣는다. 스크롤 한 번에 여러 개가 들어오면
+    // 그 일이 전부 이 자리에서 벌어져 스크롤이 멎는다.
+    if (!e.drawn) wacEnqueue(e, "draw");
+    else if (e.dirty) wacEnqueue(e, "paint");
   }
 }, { rootMargin: "300px" });
 
