@@ -757,11 +757,6 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
   const hidden = rows.filter(r => !isBad(r) && isAbsurd(r._val, bounds, r._lim, false));
   const others = rows.filter(r => !isBad(r) && r._val !== 0
                                   && !isAbsurd(r._val, bounds, r._lim, false));
-  // hold 건이 범위 밖이면 지우지 않고 가장자리로 끌어다 세모로 세운다
-  for (const r of rows) {
-    r._off = isBad(r) ? offScale(r._val, bounds) : 0;
-    r._plot = r._off > 0 ? bounds.hi : r._off < 0 ? bounds.lo : r._val;
-  }
 
   const traces = [];
   function customdata(grp) {
@@ -772,23 +767,13 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     const marker = isBadGroup
       ? { color, size: 11, line: { width: 1, color: "black" } }
       : { color, size: 7 };
-    // 가장자리로 세운 점은 세모로. 하나도 없으면 배열을 안 만든다
-    if (grp.some(r => r._off)) {
-      marker.symbol = grp.map(r => r._off > 0 ? "triangle-up"
-                                 : r._off < 0 ? "triangle-down" : "circle");
-    }
     traces.push({
       x: grp.map(r => r.tkout_time),
-      y: grp.map(r => r._plot),
+      y: grp.map(r => r._val),
       mode: "markers", marker, name,
       legendrank: rank,
       customdata: customdata(grp),
-      // 끌어다 세운 점이 있으면 진짜 값을 알려주는 줄을 붙인다
-      hovertemplate: grp.some(r => r._off)
-        ? HOVER_TEMPLATE.replace("<extra></extra>", "") + "<br>%{text}<extra></extra>"
-        : HOVER_TEMPLATE,
-      text: grp.some(r => r._off)
-        ? grp.map(r => r._off ? offScaleNote(r._val) : "") : undefined,
+      hovertemplate: HOVER_TEMPLATE,
     });
   }
 
@@ -827,7 +812,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     if (focusRows.length) {
       traces.push({
         x: focusRows.map(r => r.tkout_time),
-        y: focusRows.map(r => r._plot),
+        y: focusRows.map(r => r._val),
         mode: "markers",
         marker: { color: "rgba(0,0,0,0)", size: 18, line: { width: 3, color: "black" } },
         name: `선택 WF: ${normLot(froot)} #${normWafer(fwafer)}`,
@@ -1336,9 +1321,6 @@ function wacGroups(product, itemCol) {
   let hidden = 0;
   for (const r of rows) {
     if (isAbsurd(r._val, bounds, r._lim, isHeld(r))) { hidden += 1; continue; }
-    // hold 건이 범위 밖이면 지우지 않고 가장자리로 끌어다 세운다
-    r._off = isHeld(r) ? offScale(r._val, bounds) : 0;
-    r._plot = r._off > 0 ? bounds.hi : r._off < 0 ? bounds.lo : r._val;
     // 각 점은 '그때 유효했던' 관리선으로 판정한다. 규격이 중간에 바뀌면
     // 같은 값이라도 시점에 따라 OUT 여부가 달라진다
     const v = r._val, L = r._lim;
@@ -1383,11 +1365,11 @@ function wacOverlays(entry, sel) {
   for (const r of rows) {
     if (r._wf === selWf) {
       // 고른 타점: 커지되 색은 자기 그룹 색 그대로 -- CL/SL 인지 계속 보인다
-      hit.x.push(r._x); hit.y.push(r._plot === undefined ? r._val : r._plot);
+      hit.x.push(r._x); hit.y.push(r._val);
       hit.color.push(r._c); hit.size.push(WAC_SIZE_SEL);
     } else if (r._c === WAC_GRAY) {
       // 같은 lot 은 회색 타점만 진하게. CL/SL 은 제 색을 잃으면 안 된다
-      lot.x.push(r._x); lot.y.push(r._plot === undefined ? r._val : r._plot);
+      lot.x.push(r._x); lot.y.push(r._val);
       lot.color.push(WAC_SAME); lot.size.push(WAC_SIZE);
     }
   }
@@ -1449,29 +1431,17 @@ function wacDrawChart(entry) {
   // 벗어난 타점(CL/SL)에만 조치 내역을 붙인다. 회색 배경 타점은 수천 개라
   // 거기까지 붙이면 hover 문자열만 쓸데없이 몇 배가 된다.
   const dispo = wacDispo(state.product, itemCol);
-  const outCd = (rows) => rows.map(r => {
-    const note = dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD;
-    // 가장자리로 끌어다 세운 점은 hover 에 진짜 값을 적는다. 안 그러면
-    // 가장자리 좌표가 그 점의 값인 줄 알게 된다.
-    return r._cd.concat([r._off ? offScaleNote(r._val) + "<br>" + note : note]);
-  });
+  const outCd = (rows) => rows.map(r =>
+    r._cd.concat([dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD]));
   const scatter = (rows, extra) => ({
     // scattergl(WebGL) 은 여기서 쓰면 안 된다. 브라우저는 WebGL 컨텍스트를
     // 16개 안팎까지만 살려두는데 이 화면은 차트가 20개를 넘어서, 넘어가는
     // 순간 "Too many active WebGL contexts" 와 함께 먼저 그린 차트가 통째로
     // 비어버린다. 속도는 스크롤에 맞춘 지연 렌더와 restyle 로 확보한다.
     type: "scatter", mode: "markers",
-    x: rows.map(r => r._x),
-    // _plot: 범위 밖으로 끌어다 세운 hold 건은 가장자리 좌표를 쓴다
-    y: rows.map(r => (r._plot === undefined ? r._val : r._plot)),
+    x: rows.map(r => r._x), y: rows.map(r => r._val),
     ...extra,
   });
-
-  // 범위 밖 표시가 하나라도 있으면 그 트레이스의 기호를 점마다 지정한다.
-  // 전부 동그라미면 배열을 안 만든다 -- 수천 점짜리 배열이 공짜는 아니다.
-  const symbols = (rows) => rows.some(r => r._off)
-    ? rows.map(r => r._off > 0 ? "triangle-up" : r._off < 0 ? "triangle-down" : "circle")
-    : undefined;
 
   const legendField = wacLegendField(itemCol);
   const traces = [];
@@ -1486,7 +1456,7 @@ function wacDrawChart(entry) {
     for (const g of [WAC_CL, WAC_SL]) {
       traces.push(scatter(groups[g], {
         name: names[g], legendrank: ranks[g],
-        marker: { color: colors[g], size: WAC_SIZE, symbol: symbols(groups[g]) },
+        marker: { color: colors[g], size: WAC_SIZE },
         customdata: outCd(groups[g]), hovertemplate: HOVER_TEMPLATE_OUT,
       }));
     }
@@ -1510,8 +1480,7 @@ function wacDrawChart(entry) {
       // hover 로라도 그 점이 어떤 건이었는지 알 수 있어야 한다.
       traces.push(scatter(rows, {
         name: key, legendrank: 1000 + i,
-        marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE,
-                  symbol: symbols(rows) },
+        marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE },
         customdata: outCd(rows), hovertemplate: HOVER_TEMPLATE_OUT,
       }));
       i += 1;
@@ -1880,21 +1849,6 @@ function robustBounds(values) {
   }
   if (!(scale > 0)) return null;   // 사실상 값이 하나뿐이면 거를 것이 없다
   return { lo: med - OUTLIER_K * scale, hi: med + OUTLIER_K * scale };
-}
-
-// hold 건이 어이없는 값을 갖고 있으면 -- hold 사유가 계측 실패인 경우가
-// 흔하다 -- 지우지는 않되 축까지 끌고 가게 두지도 않는다. 값은 차트 가장자리로
-// 끌어다 세모로 표시하고, 진짜 값은 hover 에 적는다. 지우면 hold 의 근거가
-// 사라지고, 그대로 두면 나머지 점이 한 줄로 눌려 아무것도 안 보인다.
-function offScale(val, bounds) {
-  if (!bounds) return 0;
-  if (val > bounds.hi) return 1;
-  if (val < bounds.lo) return -1;
-  return 0;
-}
-
-function offScaleNote(val) {
-  return `실제값 ${val.toLocaleString()} (차트 범위 밖)`;
 }
 
 // 숨길 값인가. hold 로 잡힌 wafer 는 절대 숨기지 않는다 -- hold 가 걸린
