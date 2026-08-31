@@ -126,19 +126,25 @@
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
   .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
   .wac-chart .wac-nolimit { font-size: 0.75rem; color: #b45309; margin-bottom: 2px; }
-  /* 통계 띠: 셋을 한 줄에. 아래 차트가 주인공이라 높이는 낮게 못 박는다 */
-  .wac-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
-               margin: 6px 0 4px; }
-  .wac-stat { border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 8px; }
+  /* 통계 띠: 셋을 한 줄에, 화면 왼쪽 절반만 쓴다. 오른쪽 절반은 나중에
+     뭘 더 붙일 자리로 비워둔다. 아래 차트가 주인공이라 높이는 낮게 못 박는다 */
+  .wac-stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+                   margin: 6px 0 4px; }
+  .wac-stats { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 8px; }
+  .wac-stat { border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 8px;
+              min-width: 0; }   /* grid 칸이 내용에 밀려 넘치지 않게 */
   .wac-stat-title { font-size: 0.78rem; font-weight: 700; color: #444;
-                    margin-bottom: 2px; }
+                    margin-bottom: 2px; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis; }
   .wac-stats-body { height: 132px; }
   .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px; }
   table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem; }
   table.wac-stats-table th { text-align: right; color: #666; font-weight: 600;
-                             padding: 2px 10px 2px 0; border-bottom: 1px solid #e2e8f0; }
+                             padding: 1px 7px 2px 0; border-bottom: 1px solid #e2e8f0; }
   table.wac-stats-table th:first-child, table.wac-stats-table td:first-child { text-align: left; }
-  table.wac-stats-table td { text-align: right; padding: 2px 10px 2px 0; }
+  /* 5행이면 132px 안에 아슬아슬하게 들어간다. 폰트가 조금만 커져도 잘리므로
+     행 간격을 좁혀 여유를 둔다 */
+  table.wac-stats-table td { text-align: right; padding: 1px 7px 1px 0; }
   table.wac-stats-table td.up { color: #d33; font-weight: 700; }
   table.wac-stats-table td.new { color: #b45309; font-weight: 700; }
 </style>
@@ -238,19 +244,24 @@
     <!-- OCAP(hold) 요약. 아래 차트는 trend 를 보는 자리라 여기만 dc 를
          본다. 셋을 한 줄에 같이 두고 높이를 낮게 잡아서, 한눈에 들어오되
          정작 봐야 할 아래 차트를 밀어내지 않게 한다. -->
-    <div class="wac-stats">
-      <div class="wac-stat">
-        <div class="wac-stat-title">월별 OCAP 건수</div>
-        <div class="wac-stats-body" id="wacStatMonth"></div>
+    <div class="wac-stats-row">
+      <div class="wac-stats">
+        <div class="wac-stat">
+          <div class="wac-stat-title">월별 OCAP 건수</div>
+          <div class="wac-stats-body" id="wacStatMonth"></div>
+        </div>
+        <div class="wac-stat">
+          <div class="wac-stat-title">OCAP TOP5 item</div>
+          <div class="wac-stats-body" id="wacStatItem"></div>
+        </div>
+        <div class="wac-stat">
+          <div class="wac-stat-title">전월 대비 증가율 TOP5</div>
+          <div class="wac-stats-body" id="wacStatGrowth"></div>
+        </div>
       </div>
-      <div class="wac-stat">
-        <div class="wac-stat-title">OCAP TOP5 item</div>
-        <div class="wac-stats-body" id="wacStatItem"></div>
-      </div>
-      <div class="wac-stat">
-        <div class="wac-stat-title">전월 대비 증가율 TOP5</div>
-        <div class="wac-stats-body" id="wacStatGrowth"></div>
-      </div>
+      <!-- 오른쪽 절반은 비워둔 자리. 여기에 뭘 더 넣게 되면 이 div 안에
+           .wac-stats 를 하나 더 두면 왼쪽과 같은 모양/높이로 맞는다. -->
+      <div id="wacStatsSpare"></div>
     </div>
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
@@ -1455,10 +1466,14 @@ function renderWacStats() {
   } else if (!s.growth.length) {
     note(growthBody, `${s.growthMonths[1]} 은 ${s.growthMonths[0]} 보다 늘어난 item 이 없습니다.`);
   } else {
+    // 칸이 좁아 "2026-07" 을 그대로 쓰면 표가 넘친다. 두 달은 반드시 이웃한
+    // 달이라 연도까지 적을 필요가 없어서 "7월" 로 줄인다.
+    const shortMonth = (m) => Number(m.slice(5, 7)) + "월";
     const [prevM, curM] = s.growthMonths;
     const table = el("table", { class: "wac-stats-table" });
     const head = el("tr");
-    ["item", prevM, curM, "증가율"].forEach(h => head.appendChild(el("th", { text: h })));
+    ["item", shortMonth(prevM), shortMonth(curM), "증가율"]
+      .forEach(h => head.appendChild(el("th", { text: h })));
     table.appendChild(head);
     for (const g of s.growth) {
       const tr = el("tr");
