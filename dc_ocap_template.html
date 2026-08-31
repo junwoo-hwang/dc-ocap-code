@@ -126,6 +126,21 @@
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
   .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
   .wac-chart .wac-nolimit { font-size: 0.75rem; color: #b45309; margin-bottom: 2px; }
+  /* 통계 띠. 아래 차트가 주인공이므로 왼쪽에 작게 붙인다. 높이는 탭마다
+     달라지면 아래 차트가 그때그때 밀리므로 못 박아 둔다 */
+  .wac-stats { border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 8px;
+               margin: 6px 0 4px; max-width: 620px; }
+  .seg.wac-stats-tabs { margin-bottom: 4px; }
+  .seg.wac-stats-tabs button { padding: 0.12rem 0.5rem; font-size: 0.75rem; }
+  .wac-stats-body { height: 132px; }
+  .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px; }
+  table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem; }
+  table.wac-stats-table th { text-align: right; color: #666; font-weight: 600;
+                             padding: 2px 10px 2px 0; border-bottom: 1px solid #e2e8f0; }
+  table.wac-stats-table th:first-child, table.wac-stats-table td:first-child { text-align: left; }
+  table.wac-stats-table td { text-align: right; padding: 2px 10px 2px 0; }
+  table.wac-stats-table td.up { color: #d33; font-weight: 700; }
+  table.wac-stats-table td.new { color: #b45309; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -219,6 +234,17 @@
       <div class="right">
         <div class="wac-stamp">(Latest Data : __GENERATED_AT__)</div>
       </div>
+    </div>
+    <!-- OCAP(hold) 요약. 아래 차트는 trend 를 보는 자리라 여기만 dc 를
+         본다. 자리를 많이 차지하면 정작 차트가 밀리므로 한 번에 한 장만,
+         낮게 그린다. -->
+    <div class="wac-stats">
+      <div class="seg wac-stats-tabs" id="wacStatsTabs">
+        <button data-val="month" class="active">월별 OCAP 건수</button>
+        <button data-val="item">OCAP TOP5 item</button>
+        <button data-val="growth">전월 대비 증가율 TOP5</button>
+      </div>
+      <div class="wac-stats-body" id="wacStatsBody"></div>
     </div>
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
@@ -320,6 +346,12 @@ const HOVER_TEMPLATE =
   "eqp_id=%{customdata[4]}<br>" +
   "lot_type=%{customdata[5]}<br>" +
   "rw_cnt=%{customdata[6]}<extra></extra>";
+// CL/SL 을 벗어난 타점에만 쓰는 hover. 뒤에 조치 내역 3줄이 더 붙는다 --
+// 벗어난 점을 봤을 때 제일 먼저 궁금한 게 "이건 누가 뭐라고 처리했나" 라서,
+// 차트를 떠나 리스트로 가지 않아도 그 자리에서 보이게 한다.
+const HOVER_TEMPLATE_OUT =
+  HOVER_TEMPLATE.replace("<extra></extra>", "") +
+  "<br>%{customdata[7]}<extra></extra>";
 const LIMIT_COLORS = { scrap: "red", control: "blue" };
 const CATEGORY_COLORS = [
   "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
@@ -335,6 +367,7 @@ const state = {
   page: "dcocap",          // "dcocap" | "wac"
   wacSelected: null,       // {rootLotId, waferId} -- 모든 WAC 차트에 동시 적용
   wacSearch: "",
+  wacStatsTab: "month",     // "month" | "item" | "growth"
   selectedLotId: null,
   selectedRwCnt: null,
   itemIdxByKey: {},
@@ -843,6 +876,39 @@ function ensureTrendSkeleton() {
   });
 }
 
+// 확대와 반대 방향(오른쪽 -> 왼쪽)으로 끌면 확대를 푼다.
+//
+// plotly 는 어느 방향으로 끌든 그 상자로 확대하므로, 방향은 우리가 직접
+// 본다. 끝난 자리가 시작한 자리보다 왼쪽이면, plotly 가 확대를 마친 직후에
+// autorange 로 되돌린다. 확대 모드일 때만 -- 이동(pan) 모드에서 왼쪽으로
+// 끄는 건 그냥 이동이다.
+const UNZOOM_DRAG_PX = 25;   // 이만큼은 끌어야 실수로 안 풀린다
+
+// 놓는 순간은 차트가 아니라 document 에서 받는다. plotly 는 끌기가 시작되면
+// 화면 전체를 덮는 레이어를 만들어 그 위에서 마우스를 좇으므로, 차트에 건
+// mouseup 은 영영 오지 않는다.
+let _unzoomDrag = null;   // {gd, x}
+
+document.addEventListener("mouseup", (e) => {
+  const start = _unzoomDrag;
+  _unzoomDrag = null;
+  if (!start) return;
+  if (e.clientX - start.x > -UNZOOM_DRAG_PX) return;
+  // plotly 가 이 mouseup 으로 확대를 끝낸 뒤에 되돌려야 한다
+  setTimeout(() => {
+    Plotly.relayout(start.gd, { "xaxis.autorange": true, "yaxis.autorange": true });
+  }, 0);
+});
+
+function bindReverseDragReset(gd) {
+  if (gd._unzoomBound) return;      // 차트를 다시 그려도 한 번만 건다
+  gd._unzoomBound = true;
+  gd.addEventListener("mousedown", (e) => {
+    const mode = gd._fullLayout && gd._fullLayout.dragmode;
+    _unzoomDrag = (mode === "zoom" || mode === undefined) ? { gd, x: e.clientX } : null;
+  });
+}
+
 function handleChartClick(clickedRoot, clickedWafer, itemId) {
   state.focusedWafer = { product: state.product, itemId, rootLotId: clickedRoot, waferId: clickedWafer };
 
@@ -958,6 +1024,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
       warningBox.appendChild(el("div", { class: "warning-box", text: `${itemId} 은(는) 이 제품 trend 에 측정값이 없습니다.` }));
     }
     Plotly.react("chartDiv", traces, layout, { displayModeBar: true, responsive: true });
+    bindReverseDragReset(document.getElementById("chartDiv"));
     if (!chartClickBound) {
       document.getElementById("chartDiv").on("plotly_click", (ev) => {
         const pt = ev.points && ev.points[0];
@@ -1008,6 +1075,50 @@ function renderTrendAndComment(dcAll, dcFiltered) {
 // ====================================================================
 // WAC Trend 페이지
 // ====================================================================
+
+// CL/SL 을 벗어난 타점의 hover 에 붙일 조치 내역. dc 를 (root_lot_id,
+// wafer_id, item_id) 로 뒤져서 comment/owner/code 3줄을 미리 만들어 둔다.
+// 벗어났다고 다 hold 인 건 아니라서, 기록이 없는 쪽이 오히려 흔하다.
+const WAC_NO_HOLD = "(hold 이력 없음)";
+const _wacDispoCache = new Map();
+
+function escapeHover(text) {
+  // hover 는 HTML 로 그려진다. 코멘트에 부등호가 섞여 있으면 그 뒤가
+  // 통째로 안 보이므로 먼저 막아둔다.
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function wacDispo(product, itemCol) {
+  const key = product + "||" + String(itemCol).trim().toLowerCase();
+  if (_wacDispoCache.has(key)) return _wacDispoCache.get(key);
+  const want = String(itemCol).trim().toLowerCase();
+  const acc = new Map();
+  for (const r of (DATA.dc[product] || [])) {
+    if (String(r.item_id).trim().toLowerCase() !== want) continue;
+    const k = pairKey(r.root_lot_id, r.wafer_id);
+    let b = acc.get(k);
+    if (!b) acc.set(k, b = { comment: [], owner: [], code: [] });
+    // 같은 wafer/item 이 rework 로 여러 번 걸리면 값이 여러 개다.
+    // 중복만 걷어내고 순서대로 잇는다.
+    for (const f of ["comment", "owner", "code"]) {
+      const v = r[f] === null || r[f] === undefined ? "" : String(r[f]).trim();
+      if (v && !b[f].includes(v)) b[f].push(v);
+    }
+  }
+  const line = (arr) => {
+    const t = arr.join(" / ");
+    if (!t) return "-";
+    // 코멘트가 길면 hover 상자가 차트를 덮는다. 한 줄 분량에서 자른다.
+    return escapeHover(t.length > 48 ? t.slice(0, 47) + "…" : t);
+  };
+  const out = new Map();
+  for (const [k, b] of acc) {
+    out.set(k, `comment : ${line(b.comment)}<br>owner : ${line(b.owner)}`
+               + `<br>code : ${line(b.code)}`);
+  }
+  _wacDispoCache.set(key, out);
+  return out;
+}
 
 // 측정값이 있는 행만 한 번 추려두고 재사용한다. 클릭할 때마다 다시 훑으면
 // item 20여 개 x 수천 행을 매번 되풀이하게 된다.
@@ -1137,6 +1248,9 @@ function wacDrawChart(entry) {
   const names = ["trend", "CL OUT", "SL OUT"];
   const ranks = [1100, 20, 10];
   const colors = [WAC_GRAY, LIMIT_COLORS.control, LIMIT_COLORS.scrap];
+  // 벗어난 타점(CL/SL)에만 조치 내역을 붙인다. 회색 배경 타점은 수천 개라
+  // 거기까지 붙이면 hover 문자열만 쓸데없이 몇 배가 된다.
+  const dispo = wacDispo(state.product, itemCol);
   const traces = [WAC_TREND, WAC_CL, WAC_SL].map(i => ({
     // scattergl(WebGL) 은 여기서 쓰면 안 된다. 브라우저는 WebGL 컨텍스트를
     // 16개 안팎까지만 살려두는데 이 화면은 차트가 20개를 넘어서, 넘어가는
@@ -1146,8 +1260,10 @@ function wacDrawChart(entry) {
     x: groups[i].map(r => r._x), y: groups[i].map(r => r._val),
     mode: "markers", name: names[i], legendrank: ranks[i],
     marker: { color: colors[i], size: WAC_SIZE },
-    customdata: groups[i].map(r => r._cd),
-    hovertemplate: HOVER_TEMPLATE,
+    customdata: i === WAC_TREND
+      ? groups[i].map(r => r._cd)
+      : groups[i].map(r => r._cd.concat([dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD])),
+    hovertemplate: i === WAC_TREND ? HOVER_TEMPLATE : HOVER_TEMPLATE_OUT,
   }));
   const [lotOv, hitOv] = wacOverlays(entry, state.wacSelected);
   for (const ov of [lotOv, hitOv]) {
@@ -1166,6 +1282,7 @@ function wacDrawChart(entry) {
                 xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
   Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
+  bindReverseDragReset(div);
   div.on("plotly_click", (ev) => {
     const pt = ev.points && ev.points[0];
     if (!pt || !pt.customdata) return;
@@ -1204,7 +1321,145 @@ function wacApplySelection() {
   }
 }
 
+// ---- 통계 띠 --------------------------------------------------------
+// 아래 차트들은 trend(측정값)를 보지만, 여기 세 장은 dc(hold)를 본다.
+// 건수는 요청대로 lot_id 로 센다 -- 한 hold 가 wafer 와 item 여러 개로
+// 퍼져 있어서 행을 세면 같은 건이 수십 번 잡힌다. 같은 lot 이 한 달에 두
+// 번 걸리면(rework) 그 달에는 한 건으로 센다.
+function wacStats(product) {
+  const monthLots = new Map();       // "YYYY-MM" -> Set(lot_id)
+  const itemLots = new Map();        // item_id   -> Set(lot_id)
+  const itemMonth = new Map();       // item_id   -> Map(month -> Set(lot_id))
+  const add = (map, key, lot) => {
+    let s = map.get(key);
+    if (!s) map.set(key, s = new Set());
+    s.add(lot);
+  };
+  for (const r of (DATA.dc[product] || [])) {
+    const month = String(r.hold_time || "").slice(0, 7);
+    if (month.length !== 7) continue;          // hold_time 이 비었거나 이상한 행
+    const lot = String(r.lot_id);
+    const item = String(r.item_id);
+    add(monthLots, month, lot);
+    add(itemLots, item, lot);
+    if (!itemMonth.has(item)) itemMonth.set(item, new Map());
+    add(itemMonth.get(item), month, lot);
+  }
+  const months = Array.from(monthLots.keys()).sort();
+
+  const topItems = Array.from(itemLots, ([item, s]) => ({ item, n: s.size }))
+    .sort((a, b) => b.n - a.n || (a.item < b.item ? -1 : 1)).slice(0, 5);
+
+  // 증가율은 '가장 최근 달' 과 '그 전 달' 을 견준다. 전월이 0인 item 은
+  // 나눌 수가 없으니 '신규' 로 따로 표시하고 유한한 증가율 뒤에 붙인다.
+  const growth = [];
+  if (months.length >= 2) {
+    const cur = months[months.length - 1], prev = months[months.length - 2];
+    for (const [item, mm] of itemMonth) {
+      const c = (mm.get(cur) || new Set()).size;
+      const p = (mm.get(prev) || new Set()).size;
+      if (c === 0 || c <= p) continue;         // 늘어난 것만
+      growth.push({ item, prev: p, cur: c, rate: p > 0 ? (c - p) / p : null });
+    }
+    growth.sort((a, b) => {
+      if (a.rate === null && b.rate === null) return b.cur - a.cur;
+      if (a.rate === null) return 1;
+      if (b.rate === null) return -1;
+      return b.rate - a.rate || b.cur - a.cur;
+    });
+  }
+  return {
+    months,
+    monthCounts: months.map(m => monthLots.get(m).size),
+    topItems,
+    growth: growth.slice(0, 5),
+    growthMonths: months.length >= 2 ? months.slice(-2) : null,
+  };
+}
+
+const WAC_STATS_LAYOUT = {
+  height: 132, margin: { t: 8, b: 26, l: 40, r: 10 },
+  showlegend: false, dragmode: false,
+  font: { size: 10 },
+  // 막대는 칸 안에서만 굵어지게 둔다. 달이 두어 개뿐일 때 기본값이면
+  // 막대 하나가 화면 폭을 통째로 먹어서 그림이 아니라 색면이 된다
+  bargap: 0.55,
+};
+
+// 건수 축은 정수만 찍는다. 건수가 한 자리일 때 plotly 기본 눈금은 0.5,
+// 1.5 를 넣는데, 'lot 0.5건' 은 없는 수다.
+function countAxis(maxValue, extra) {
+  return { rangemode: "tozero", tick0: 0,
+           ...(maxValue <= 10 ? { dtick: 1 } : {}), ...extra };
+}
+
+function renderWacStats() {
+  const body = document.getElementById("wacStatsBody");
+  document.querySelectorAll("#wacStatsTabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.val === state.wacStatsTab));
+  // 탭을 옮길 때마다 남은 차트를 반드시 걷어낸다 (WAC 그리드와 같은 이유)
+  Plotly.purge(body);
+  body.innerHTML = "";
+
+  const s = wacStats(state.product);
+  const note = (text) => body.appendChild(el("div", { class: "wac-stats-empty", text }));
+
+  if (state.wacStatsTab === "month") {
+    if (!s.months.length) return note("이 제품에는 집계할 OCAP 이력이 없습니다.");
+    Plotly.react(body, [{
+      type: "bar", x: s.months, y: s.monthCounts,
+      marker: { color: "#4b7bec" },
+      hovertemplate: "%{x}<br>%{y}건<extra></extra>",
+    }], {
+      ...WAC_STATS_LAYOUT,
+      xaxis: { type: "category" },
+      yaxis: countAxis(Math.max(...s.monthCounts),
+                       { title: { text: "건(lot)", font: { size: 9 } } }),
+    }, { displayModeBar: false, responsive: true });
+
+  } else if (state.wacStatsTab === "item") {
+    if (!s.topItems.length) return note("이 제품에는 집계할 OCAP 이력이 없습니다.");
+    // 가로 막대: item 이름이 길어도 안 잘린다. 1위가 위로 오도록 뒤집는다
+    const rows = s.topItems.slice().reverse();
+    Plotly.react(body, [{
+      type: "bar", orientation: "h",
+      x: rows.map(r => r.n), y: rows.map(r => r.item),
+      marker: { color: "#e15241" },
+      text: rows.map(r => r.n + "건"), textposition: "auto",
+      hovertemplate: "%{y}<br>%{x}건<extra></extra>",
+    }], {
+      ...WAC_STATS_LAYOUT,
+      margin: { t: 8, b: 26, l: 62, r: 24 },
+      bargap: 0.35,
+      xaxis: countAxis(rows[rows.length - 1].n), yaxis: { type: "category" },
+    }, { displayModeBar: false, responsive: true });
+
+  } else {
+    if (!s.growthMonths) return note("달이 두 개는 있어야 증가율을 낼 수 있습니다.");
+    if (!s.growth.length) {
+      return note(`${s.growthMonths[1]} 은 ${s.growthMonths[0]} 보다 늘어난 item 이 없습니다.`);
+    }
+    const [prevM, curM] = s.growthMonths;
+    const table = el("table", { class: "wac-stats-table" });
+    const head = el("tr");
+    ["item", prevM, curM, "증가율"].forEach(h => head.appendChild(el("th", { text: h })));
+    table.appendChild(head);
+    for (const g of s.growth) {
+      const tr = el("tr");
+      tr.appendChild(el("td", { text: g.item }));
+      tr.appendChild(el("td", { text: String(g.prev) }));
+      tr.appendChild(el("td", { text: String(g.cur) }));
+      tr.appendChild(g.rate === null
+        ? el("td", { class: "new", text: "신규" })
+        : el("td", { class: "up", text: "+" + Math.round(g.rate * 100) + "%" }));
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+  }
+}
+
 function renderWac() {
+  renderWacStats();
   document.getElementById("wacCounts").innerHTML =
     "WAC item 수<br>" + Object.keys(DATA.trend)
       .map(p => `${p} : ${(DATA.itemCols[p] || []).length}건`).join(", ");
@@ -1303,6 +1558,13 @@ document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
   state.product = btn.dataset.val;
   state.wacSelected = null;
   renderWac();
+});
+document.getElementById("wacStatsTabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || btn.dataset.val === state.wacStatsTab) return;
+  state.wacStatsTab = btn.dataset.val;
+  // 통계만 갈아끼운다 -- 아래 차트 20여 개는 그대로 두어야 탭 전환이 가볍다
+  renderWacStats();
 });
 document.getElementById("wacSearch").addEventListener("input", (e) => {
   state.wacSearch = e.target.value;
