@@ -750,12 +750,18 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
                          || (r._lim.lcl !== null && r._val < r._lim.lcl));
 
   const bad = rows.filter(r => isBad(r));
-  // exact-zero readings are almost always measurement glitches, not real
-  // excursions -- dropped from the background context points only, so a
-  // handful of them don't blow out the y-axis. Held wafers are exempt: a
-  // hold is often triggered by exactly this kind of extreme value, and
-  // hiding it would hide the reason it was held in the first place.
-  const others = rows.filter(r => !isBad(r) && r._val !== 0);
+  // 어이없는 값은 배경에서만 뺀다. 이런 값 하나가 y축을 통째로 늘려서 정작
+  // 봐야 할 흐름이 한 줄로 눌려 버린다. hold 로 잡힌 wafer 는 예외 -- hold
+  // 사유가 바로 그 값인 경우가 많다.
+  const bounds = robustBounds(rows.filter(r => !isBad(r)).map(r => r._val));
+  const hidden = rows.filter(r => !isBad(r) && isAbsurd(r._val, bounds, r._lim, false));
+  const others = rows.filter(r => !isBad(r) && r._val !== 0
+                                  && !isAbsurd(r._val, bounds, r._lim, false));
+  // hold 건이 범위 밖이면 지우지 않고 가장자리로 끌어다 세모로 세운다
+  for (const r of rows) {
+    r._off = isBad(r) ? offScale(r._val, bounds) : 0;
+    r._plot = r._off > 0 ? bounds.hi : r._off < 0 ? bounds.lo : r._val;
+  }
 
   const traces = [];
   function customdata(grp) {
@@ -766,13 +772,23 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     const marker = isBadGroup
       ? { color, size: 11, line: { width: 1, color: "black" } }
       : { color, size: 7 };
+    // 가장자리로 세운 점은 세모로. 하나도 없으면 배열을 안 만든다
+    if (grp.some(r => r._off)) {
+      marker.symbol = grp.map(r => r._off > 0 ? "triangle-up"
+                                 : r._off < 0 ? "triangle-down" : "circle");
+    }
     traces.push({
       x: grp.map(r => r.tkout_time),
-      y: grp.map(r => r._val),
+      y: grp.map(r => r._plot),
       mode: "markers", marker, name,
       legendrank: rank,
       customdata: customdata(grp),
-      hovertemplate: HOVER_TEMPLATE,
+      // 끌어다 세운 점이 있으면 진짜 값을 알려주는 줄을 붙인다
+      hovertemplate: grp.some(r => r._off)
+        ? HOVER_TEMPLATE.replace("<extra></extra>", "") + "<br>%{text}<extra></extra>"
+        : HOVER_TEMPLATE,
+      text: grp.some(r => r._off)
+        ? grp.map(r => r._off ? offScaleNote(r._val) : "") : undefined,
     });
   }
 
@@ -811,7 +827,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     if (focusRows.length) {
       traces.push({
         x: focusRows.map(r => r.tkout_time),
-        y: focusRows.map(r => r._val),
+        y: focusRows.map(r => r._plot),
         mode: "markers",
         marker: { color: "rgba(0,0,0,0)", size: 18, line: { width: 3, color: "black" } },
         name: `선택 WF: ${normLot(froot)} #${normWafer(fwafer)}`,
@@ -838,7 +854,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     margin: { t: 30, b: 30, l: 55, r: 20 },
     height: 284,
   };
-  return { traces, layout, measuredCount: rows.length };
+  return { traces, layout, measuredCount: rows.length, hiddenCount: hidden.length };
 }
 
 // ---- rendering ----
@@ -1158,7 +1174,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
     const badPairs = new Set(itemRows.map(r => pairKey(r.root_lot_id, r.wafer_id)));
     const waferList = sortWafers(itemRows.map(r => r.wafer_id)).join(",");
 
-    const { traces, layout, measuredCount } = buildScatterTraces(
+    const { traces, layout, measuredCount, hiddenCount } = buildScatterTraces(
       state.product, itemCol, badPairs, String(lotId), state.legendField, chartFocusPair
     );
     if (measuredCount === 0) {
@@ -1174,7 +1190,10 @@ function renderTrendAndComment(dcAll, dcFiltered) {
       });
       chartClickBound = true;
     }
-    chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`;
+    // 숨긴 게 있으면 반드시 적는다. 조용히 빼면 몇 점이 어디로 갔는지
+    // 알 수가 없고, 그게 계측 실패였는지도 모르고 지나간다.
+    chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`
+      + (hiddenCount ? ` · 이상값 ${hiddenCount}점 숨김(hold 건 제외)` : "");
   }
 
   // comment panel
@@ -1308,7 +1327,18 @@ function wacGroups(product, itemCol) {
   const rows = wacRows(product, itemCol);
   const g = [[], [], []];
   const byLot = new Map();
+  // 어이없는 값은 빼고 그린다. 한 점이 y축을 통째로 늘려 놓으면 나머지가
+  // 한 줄로 눌려서 아무것도 안 보인다. hold 로 잡힌 wafer 는 남긴다 --
+  // hold 사유가 바로 그 값인 경우가 많다.
+  const held = wacDispo(product, itemCol);
+  const isHeld = (r) => held.has(r._lot + "||" + r._wf);
+  const bounds = robustBounds(rows.filter(r => !isHeld(r)).map(r => r._val));
+  let hidden = 0;
   for (const r of rows) {
+    if (isAbsurd(r._val, bounds, r._lim, isHeld(r))) { hidden += 1; continue; }
+    // hold 건이 범위 밖이면 지우지 않고 가장자리로 끌어다 세운다
+    r._off = isHeld(r) ? offScale(r._val, bounds) : 0;
+    r._plot = r._off > 0 ? bounds.hi : r._off < 0 ? bounds.lo : r._val;
     // 각 점은 '그때 유효했던' 관리선으로 판정한다. 규격이 중간에 바뀌면
     // 같은 값이라도 시점에 따라 OUT 여부가 달라진다
     const v = r._val, L = r._lim;
@@ -1333,7 +1363,7 @@ function wacGroups(product, itemCol) {
     if (out[out.length - 1] !== src[src.length - 1]) out.push(src[src.length - 1]);
     g[WAC_TREND] = out;
   }
-  return { g, byLot };
+  return { g, byLot, hidden };
 }
 
 // 선택 표시는 '덧그리기' 로 한다. 바탕(회색/CL/SL)은 한 번 그리고 끝이고,
@@ -1353,11 +1383,11 @@ function wacOverlays(entry, sel) {
   for (const r of rows) {
     if (r._wf === selWf) {
       // 고른 타점: 커지되 색은 자기 그룹 색 그대로 -- CL/SL 인지 계속 보인다
-      hit.x.push(r._x); hit.y.push(r._val);
+      hit.x.push(r._x); hit.y.push(r._plot === undefined ? r._val : r._plot);
       hit.color.push(r._c); hit.size.push(WAC_SIZE_SEL);
     } else if (r._c === WAC_GRAY) {
       // 같은 lot 은 회색 타점만 진하게. CL/SL 은 제 색을 잃으면 안 된다
-      lot.x.push(r._x); lot.y.push(r._val);
+      lot.x.push(r._x); lot.y.push(r._plot === undefined ? r._val : r._plot);
       lot.color.push(WAC_SAME); lot.size.push(WAC_SIZE);
     }
   }
@@ -1410,7 +1440,7 @@ function wacDrawChart(entry) {
   // 않는 item 수십 개 x 수천 행을 첫 화면 뜨기 전에 훑게 된다
   if (!entry.groups) {
     const built = wacGroups(state.product, itemCol);
-    entry.groups = built.g; entry.byLot = built.byLot;
+    entry.groups = built.g; entry.byLot = built.byLot; entry.hidden = built.hidden;
   }
   const groups = entry.groups;
   const names = ["trend", "CL OUT", "SL OUT"];
@@ -1419,17 +1449,29 @@ function wacDrawChart(entry) {
   // 벗어난 타점(CL/SL)에만 조치 내역을 붙인다. 회색 배경 타점은 수천 개라
   // 거기까지 붙이면 hover 문자열만 쓸데없이 몇 배가 된다.
   const dispo = wacDispo(state.product, itemCol);
-  const outCd = (rows) => rows.map(r =>
-    r._cd.concat([dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD]));
+  const outCd = (rows) => rows.map(r => {
+    const note = dispo.get(r._lot + "||" + r._wf) || WAC_NO_HOLD;
+    // 가장자리로 끌어다 세운 점은 hover 에 진짜 값을 적는다. 안 그러면
+    // 가장자리 좌표가 그 점의 값인 줄 알게 된다.
+    return r._cd.concat([r._off ? offScaleNote(r._val) + "<br>" + note : note]);
+  });
   const scatter = (rows, extra) => ({
     // scattergl(WebGL) 은 여기서 쓰면 안 된다. 브라우저는 WebGL 컨텍스트를
     // 16개 안팎까지만 살려두는데 이 화면은 차트가 20개를 넘어서, 넘어가는
     // 순간 "Too many active WebGL contexts" 와 함께 먼저 그린 차트가 통째로
     // 비어버린다. 속도는 스크롤에 맞춘 지연 렌더와 restyle 로 확보한다.
     type: "scatter", mode: "markers",
-    x: rows.map(r => r._x), y: rows.map(r => r._val),
+    x: rows.map(r => r._x),
+    // _plot: 범위 밖으로 끌어다 세운 hold 건은 가장자리 좌표를 쓴다
+    y: rows.map(r => (r._plot === undefined ? r._val : r._plot)),
     ...extra,
   });
+
+  // 범위 밖 표시가 하나라도 있으면 그 트레이스의 기호를 점마다 지정한다.
+  // 전부 동그라미면 배열을 안 만든다 -- 수천 점짜리 배열이 공짜는 아니다.
+  const symbols = (rows) => rows.some(r => r._off)
+    ? rows.map(r => r._off > 0 ? "triangle-up" : r._off < 0 ? "triangle-down" : "circle")
+    : undefined;
 
   const legendField = wacLegendField(itemCol);
   const traces = [];
@@ -1444,7 +1486,7 @@ function wacDrawChart(entry) {
     for (const g of [WAC_CL, WAC_SL]) {
       traces.push(scatter(groups[g], {
         name: names[g], legendrank: ranks[g],
-        marker: { color: colors[g], size: WAC_SIZE },
+        marker: { color: colors[g], size: WAC_SIZE, symbol: symbols(groups[g]) },
         customdata: outCd(groups[g]), hovertemplate: HOVER_TEMPLATE_OUT,
       }));
     }
@@ -1468,7 +1510,8 @@ function wacDrawChart(entry) {
       // hover 로라도 그 점이 어떤 건이었는지 알 수 있어야 한다.
       traces.push(scatter(rows, {
         name: key, legendrank: 1000 + i,
-        marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE },
+        marker: { color: CATEGORY_COLORS[i % CATEGORY_COLORS.length], size: WAC_SIZE,
+                  symbol: symbols(rows) },
         customdata: outCd(rows), hovertemplate: HOVER_TEMPLATE_OUT,
       }));
       i += 1;
@@ -1493,6 +1536,11 @@ function wacDrawChart(entry) {
   addLimitSteps(traces, annotations, specRevisions(state.product, itemCol),
                 xs0.length ? xs0.reduce((a,b)=>a<b?a:b) : undefined,
                 xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
+  if (entry.hiddenNote) {
+    entry.hiddenNote.hidden = !entry.hidden;
+    entry.hiddenNote.textContent = entry.hidden
+      ? `이상값 ${entry.hidden}점 숨김 (hold 건 제외)` : "";
+  }
   Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
   bindReverseDragReset(div);
@@ -1750,6 +1798,63 @@ const WAC_STATS_LAYOUT = {
 
 // "2026-07" -> "7월". 견주는 달은 늘 이웃한 달이라 연도는 군더더기다.
 function monthLabel(m) { return Number(String(m).slice(5, 7)) + "월"; }
+
+// 어이없는 값(계측 실패로 들어온 sentinel, 0 같은 것) 걸러내기.
+//
+// 평균/표준편차로는 못 잡는다 -- 9.9e9 같은 값 하나가 표준편차를 1억으로
+// 만들어서 5시그마 범위가 ±5억이 되고, 정작 그 값이 범위 안에 들어온다.
+// 그래서 median 과 MAD(중앙값에서 떨어진 거리의 중앙값)로 재고, MAD 에
+// 1.4826 을 곱해 표준편차와 같은 눈금으로 바꾼다.
+//
+// 5로 잡은 이유: 관리선(UCL/LCL)이 보통 ±3시그마다. 3으로 자르면 걸러야 할
+// 이상값이 아니라 정작 봐야 할 CL OUT 타점을 지우게 된다 (모의 데이터
+// 8000점에서 3시그마는 20개를 걸렀는데 그 중 18개가 멀쩡한 값이었고,
+// 5시그마는 진짜 이상값 2개만 걸렀다).
+const OUTLIER_K = 5;
+const OUTLIER_MIN_N = 20;      // 이보다 적으면 흩어진 정도를 못 믿는다
+
+function robustBounds(values) {
+  if (values.length < OUTLIER_MIN_N) return null;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const med = median(sorted);
+  const dev = sorted.map(v => Math.abs(v - med)).sort((a, b) => a - b);
+  let scale = 1.4826 * median(dev);
+  if (!(scale > 0)) {
+    // 값의 절반 이상이 똑같으면 MAD 가 0 이다. 그때는 사분위로 재본다
+    const q1 = sorted[Math.floor(sorted.length * 0.25)];
+    const q3 = sorted[Math.floor(sorted.length * 0.75)];
+    scale = (q3 - q1) / 1.349;
+  }
+  if (!(scale > 0)) return null;   // 사실상 값이 하나뿐이면 거를 것이 없다
+  return { lo: med - OUTLIER_K * scale, hi: med + OUTLIER_K * scale };
+}
+
+// hold 건이 어이없는 값을 갖고 있으면 -- hold 사유가 계측 실패인 경우가
+// 흔하다 -- 지우지는 않되 축까지 끌고 가게 두지도 않는다. 값은 차트 가장자리로
+// 끌어다 세모로 표시하고, 진짜 값은 hover 에 적는다. 지우면 hold 의 근거가
+// 사라지고, 그대로 두면 나머지 점이 한 줄로 눌려 아무것도 안 보인다.
+function offScale(val, bounds) {
+  if (!bounds) return 0;
+  if (val > bounds.hi) return 1;
+  if (val < bounds.lo) return -1;
+  return 0;
+}
+
+function offScaleNote(val) {
+  return `실제값 ${val.toLocaleString()} (차트 범위 밖)`;
+}
+
+// 숨길 값인가. hold 로 잡힌 wafer 는 절대 숨기지 않는다 -- hold 가 걸린
+// 이유가 바로 그 극단값인 경우가 많아서, 숨기면 왜 걸렸는지가 사라진다.
+// 규격 안에 있는 값도 숨기지 않는다. 아무리 median 에서 멀어도 규격을
+// 지킨 값을 '어이없다' 고 할 수는 없다.
+function isAbsurd(val, bounds, lim, held) {
+  if (!bounds || held) return false;
+  if (val >= bounds.lo && val <= bounds.hi) return false;
+  if (lim && lim.lsl !== null && lim.usl !== null
+      && val >= lim.lsl && val <= lim.usl) return false;
+  return true;
+}
 
 // 건수 축은 정수만 찍는다. 건수가 한 자리일 때 plotly 기본 눈금은 0.5,
 // 1.5 를 넣는데, 'lot 0.5건' 은 없는 수다.
@@ -2059,10 +2164,15 @@ function renderWac() {
       box.appendChild(el("div", { class: "wac-nolimit",
         text: "관리선 없음 (spec 에 " + itemCol + " 이 없습니다)" }));
     }
+    // 숨긴 값이 있으면 그 자리에 적는다. 조용히 빼면 몇 점이 왜 사라졌는지
+    // 알 수가 없다 (개수는 차트를 그린 뒤에 채운다)
+    const hiddenNote = el("div", { class: "wac-nolimit" });
+    hiddenNote.hidden = true;
+    box.appendChild(hiddenNote);
     const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);
-    wacCharts.push({ div, itemCol, groups: null,
+    wacCharts.push({ div, itemCol, groups: null, hiddenNote,
                      drawn: false, visible: false, dirty: false });
   });
 
