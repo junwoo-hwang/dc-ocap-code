@@ -126,12 +126,12 @@
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
   .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
   .wac-chart .wac-nolimit { font-size: 0.75rem; color: #b45309; margin-bottom: 2px; }
-  /* 통계 띠. 아래 차트가 주인공이므로 왼쪽에 작게 붙인다. 높이는 탭마다
-     달라지면 아래 차트가 그때그때 밀리므로 못 박아 둔다 */
-  .wac-stats { border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 8px;
-               margin: 6px 0 4px; max-width: 620px; }
-  .seg.wac-stats-tabs { margin-bottom: 4px; }
-  .seg.wac-stats-tabs button { padding: 0.12rem 0.5rem; font-size: 0.75rem; }
+  /* 통계 띠: 셋을 한 줄에. 아래 차트가 주인공이라 높이는 낮게 못 박는다 */
+  .wac-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+               margin: 6px 0 4px; }
+  .wac-stat { border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 8px; }
+  .wac-stat-title { font-size: 0.78rem; font-weight: 700; color: #444;
+                    margin-bottom: 2px; }
   .wac-stats-body { height: 132px; }
   .wac-stats-empty { font-size: 0.8rem; color: #888; padding: 8px 2px; }
   table.wac-stats-table { border-collapse: collapse; font-size: 0.78rem; }
@@ -236,15 +236,21 @@
       </div>
     </div>
     <!-- OCAP(hold) 요약. 아래 차트는 trend 를 보는 자리라 여기만 dc 를
-         본다. 자리를 많이 차지하면 정작 차트가 밀리므로 한 번에 한 장만,
-         낮게 그린다. -->
+         본다. 셋을 한 줄에 같이 두고 높이를 낮게 잡아서, 한눈에 들어오되
+         정작 봐야 할 아래 차트를 밀어내지 않게 한다. -->
     <div class="wac-stats">
-      <div class="seg wac-stats-tabs" id="wacStatsTabs">
-        <button data-val="month" class="active">월별 OCAP 건수</button>
-        <button data-val="item">OCAP TOP5 item</button>
-        <button data-val="growth">전월 대비 증가율 TOP5</button>
+      <div class="wac-stat">
+        <div class="wac-stat-title">월별 OCAP 건수</div>
+        <div class="wac-stats-body" id="wacStatMonth"></div>
       </div>
-      <div class="wac-stats-body" id="wacStatsBody"></div>
+      <div class="wac-stat">
+        <div class="wac-stat-title">OCAP TOP5 item</div>
+        <div class="wac-stats-body" id="wacStatItem"></div>
+      </div>
+      <div class="wac-stat">
+        <div class="wac-stat-title">전월 대비 증가율 TOP5</div>
+        <div class="wac-stats-body" id="wacStatGrowth"></div>
+      </div>
     </div>
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
@@ -367,7 +373,6 @@ const state = {
   page: "dcocap",          // "dcocap" | "wac"
   wacSelected: null,       // {rootLotId, waferId} -- 모든 WAC 차트에 동시 적용
   wacSearch: "",
-  wacStatsTab: "month",     // "month" | "item" | "growth"
   selectedLotId: null,
   selectedRwCnt: null,
   itemIdxByKey: {},
@@ -1394,19 +1399,23 @@ function countAxis(maxValue, extra) {
 }
 
 function renderWacStats() {
-  const body = document.getElementById("wacStatsBody");
-  document.querySelectorAll("#wacStatsTabs button").forEach(b =>
-    b.classList.toggle("active", b.dataset.val === state.wacStatsTab));
-  // 탭을 옮길 때마다 남은 차트를 반드시 걷어낸다 (WAC 그리드와 같은 이유)
-  Plotly.purge(body);
-  body.innerHTML = "";
-
   const s = wacStats(state.product);
-  const note = (text) => body.appendChild(el("div", { class: "wac-stats-empty", text }));
+  // 제품을 바꿀 때마다 남은 차트를 반드시 걷어낸다 (WAC 그리드와 같은 이유:
+  // 노드만 비우면 plotly 가 window 에 건 resize 핸들러가 남는다)
+  const slot = (id) => {
+    const b = document.getElementById(id);
+    Plotly.purge(b);
+    b.innerHTML = "";
+    return b;
+  };
+  const note = (b, text) => b.appendChild(el("div", { class: "wac-stats-empty", text }));
 
-  if (state.wacStatsTab === "month") {
-    if (!s.months.length) return note("이 제품에는 집계할 OCAP 이력이 없습니다.");
-    Plotly.react(body, [{
+  // ---- 월별 OCAP 건수 ----
+  const monthBody = slot("wacStatMonth");
+  if (!s.months.length) {
+    note(monthBody, "이 제품에는 집계할 OCAP 이력이 없습니다.");
+  } else {
+    Plotly.react(monthBody, [{
       type: "bar", x: s.months, y: s.monthCounts,
       marker: { color: "#4b7bec" },
       hovertemplate: "%{x}<br>%{y}건<extra></extra>",
@@ -1416,12 +1425,16 @@ function renderWacStats() {
       yaxis: countAxis(Math.max(...s.monthCounts),
                        { title: { text: "건(lot)", font: { size: 9 } } }),
     }, { displayModeBar: false, responsive: true });
+  }
 
-  } else if (state.wacStatsTab === "item") {
-    if (!s.topItems.length) return note("이 제품에는 집계할 OCAP 이력이 없습니다.");
+  // ---- OCAP TOP5 item ----
+  const itemBody = slot("wacStatItem");
+  if (!s.topItems.length) {
+    note(itemBody, "이 제품에는 집계할 OCAP 이력이 없습니다.");
+  } else {
     // 가로 막대: item 이름이 길어도 안 잘린다. 1위가 위로 오도록 뒤집는다
     const rows = s.topItems.slice().reverse();
-    Plotly.react(body, [{
+    Plotly.react(itemBody, [{
       type: "bar", orientation: "h",
       x: rows.map(r => r.n), y: rows.map(r => r.item),
       marker: { color: "#e15241" },
@@ -1433,12 +1446,15 @@ function renderWacStats() {
       bargap: 0.35,
       xaxis: countAxis(rows[rows.length - 1].n), yaxis: { type: "category" },
     }, { displayModeBar: false, responsive: true });
+  }
 
+  // ---- 전월 대비 증가율 TOP5 ----
+  const growthBody = slot("wacStatGrowth");
+  if (!s.growthMonths) {
+    note(growthBody, "달이 두 개는 있어야 증가율을 낼 수 있습니다.");
+  } else if (!s.growth.length) {
+    note(growthBody, `${s.growthMonths[1]} 은 ${s.growthMonths[0]} 보다 늘어난 item 이 없습니다.`);
   } else {
-    if (!s.growthMonths) return note("달이 두 개는 있어야 증가율을 낼 수 있습니다.");
-    if (!s.growth.length) {
-      return note(`${s.growthMonths[1]} 은 ${s.growthMonths[0]} 보다 늘어난 item 이 없습니다.`);
-    }
     const [prevM, curM] = s.growthMonths;
     const table = el("table", { class: "wac-stats-table" });
     const head = el("tr");
@@ -1454,7 +1470,7 @@ function renderWacStats() {
         : el("td", { class: "up", text: "+" + Math.round(g.rate * 100) + "%" }));
       table.appendChild(tr);
     }
-    body.appendChild(table);
+    growthBody.appendChild(table);
   }
 }
 
@@ -1558,13 +1574,6 @@ document.getElementById("wacProductSwitch").addEventListener("click", (e) => {
   state.product = btn.dataset.val;
   state.wacSelected = null;
   renderWac();
-});
-document.getElementById("wacStatsTabs").addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn || btn.dataset.val === state.wacStatsTab) return;
-  state.wacStatsTab = btn.dataset.val;
-  // 통계만 갈아끼운다 -- 아래 차트 20여 개는 그대로 두어야 탭 전환이 가볍다
-  renderWacStats();
 });
 document.getElementById("wacSearch").addEventListener("input", (e) => {
   state.wacSearch = e.target.value;
