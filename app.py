@@ -843,6 +843,22 @@ def check_data(product_dc: dict, trend_frames: dict,
     return fatal, warnings
 
 
+def frames_by_product(frames) -> tuple[dict, dict, dict]:
+    """pull_data() 의 9개 튜플 -> (dc, trend, spec) 제품별 dict 3개.
+
+    순서로 받은 걸 이름으로 바꾸는 자리는 여기 하나뿐이다. 여러 군데서
+    각자 풀면 한 곳만 순서를 잘못 적어도 조용히 다른 제품 데이터를 그리게
+    된다. load_data() 가 뒤에 붙이는 loaded_at/problems/warnings 도 그대로
+    넘길 수 있도록 남는 건 무시한다.
+    """
+    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
+     uly_spec, sol_spec, tts_spec, *_rest) = frames
+    # 순서는 화면의 제품 전환 버튼과 같게 둔다 (ULY / TTS / SOL)
+    return ({"ULY": uly_dc, "TTS": tts_dc, "SOL": sol_dc},
+            {"ULY": uly_trend, "TTS": tts_trend, "SOL": sol_trend},
+            {"ULY": uly_spec, "TTS": tts_spec, "SOL": sol_spec})
+
+
 # Streamlit re-runs show_dc_ocap() on every click (the portal reruns its
 # whole script top to bottom, same as any Streamlit app), so pull_data()
 # is called through a cache -- otherwise every row selection would
@@ -852,15 +868,9 @@ def check_data(product_dc: dict, trend_frames: dict,
 @st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
 def load_data():
     frames = pull_data()
-    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
-     uly_spec, sol_spec, tts_spec) = frames
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
-    problems, warnings = check_data(
-        {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc},
-        {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend},
-        {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec},
-    )
+    problems, warnings = check_data(*frames_by_product(frames))
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
     loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
@@ -1120,6 +1130,354 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
 
 
 # ====================================================================
+# WAC Trend 페이지 -- 한 제품의 item 을 전부 작은 차트로 늘어놓고, 어느
+# 차트에서 타점을 누르든 그 wafer 가 모든 차트에서 같이 커진다.
+# 정적 리포트(dc_ocap_template.html)의 WAC 페이지와 같은 규칙/색/크기를
+# 쓴다 -- 값이 갈리면 두 화면이 다른 판정을 내리게 된다.
+# ====================================================================
+WAC_GRAY, WAC_SAME = "lightgray", "dimgray"
+WAC_SIZE, WAC_SIZE_SEL = 6, 14
+# 배경(회색) 타점이 이보다 많으면 고르게 솎는다. 260px 차트에 수천 점을
+# 찍어봐야 대부분 겹치고, 브라우저로 넘길 JSON 만 그만큼 커진다.
+# CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게 봐야 할 신호다.
+WAC_MAX_GRAY = 2500
+WAC_CHART_HEIGHT = 260
+WAC_GRID_COLS = 2
+# grp 값 -> (범례 이름, 색, 범례 순서). 0=정상 1=CL OUT 2=SL OUT
+WAC_GROUPS = (
+    ("trend", WAC_GRAY, 1100),
+    ("CL OUT", LIMIT_COLORS["control"], 20),
+    ("SL OUT", LIMIT_COLORS["scrap"], 10),
+)
+
+
+@st.cache_data(show_spinner=False)
+def wac_item_points(product: str, item_col: str, stamp: str) -> dict:
+    """한 (제품, item) 의 타점을 그리기 좋은 배열로 미리 만들어 캐시한다.
+
+    타점을 한 번 누를 때마다 Streamlit 은 페이지를 통째로 다시 그린다.
+    item 이 30개면 그때마다 30번 * 수천 행을 다시 훑게 되므로, 판정(CL/SL)
+    과 hover 문자열까지 여기서 한 번만 만들어 둔다. 선택 표시는 이 배열 위의
+    boolean mask 라서 클릭할 때 다시 계산할 게 거의 없다.
+
+    stamp 는 load_data() 가 찍은 적재 시각이다. 데이터프레임을 인자로 받으면
+    Streamlit 이 캐시 키를 만들려고 매번 전체를 해시하는데, 그게 계산보다
+    비싸다. 대신 값싼 문자열을 키로 쓰고 프레임은 (이미 캐시된) load_data()
+    에서 가져온다 -- 데이터가 새로 적재되면 stamp 가 바뀌어 같이 무효화된다.
+    """
+    _dc, trend_frames, spec_frames = frames_by_product(load_data())
+    trend_df, spec_df = trend_frames[product], spec_frames[product]
+
+    vals = pd.to_numeric(trend_df[item_col], errors="coerce")
+    keep = vals.notna()
+    d, v = trend_df[keep], vals[keep]
+    spec_rows = item_spec_rows(spec_df, item_col)
+    lim = limits_asof(spec_rows, d["tkout_time"])
+
+    # 규격을 벗어난 점이 관리선도 벗어난 건 당연하므로, SL 이 이기고 둘은
+    # 서로 겹치지 않는다 (build_scatter 와 같은 규칙)
+    scrap = (v > lim["usl"]).fillna(False) | (v < lim["lsl"]).fillna(False)
+    control = ((v > lim["ucl"]).fillna(False)
+               | (v < lim["lcl"]).fillna(False)) & ~scrap
+    grp = np.where(scrap, 2, np.where(control, 1, 0)).astype(np.int8)
+
+    hover = d["tkout_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    cd = np.column_stack([
+        d["root_lot_id"].astype(str), d["wafer_id"].astype(str), hover,
+        d["probe_card_id"].astype(str), d["eqp_id"].astype(str),
+        d["lot_type"].astype(str), d["rw_cnt"].astype(str),
+    ])
+
+    gray = np.flatnonzero(grp == 0)
+    if WAC_MAX_GRAY and len(gray) > WAC_MAX_GRAY:
+        step = len(gray) / WAC_MAX_GRAY
+        pick = np.floor(np.arange(WAC_MAX_GRAY) * step).astype(int)
+        # 마지막 점은 따로 넣는다. floor 는 끝에 못 닿아서 그냥 두면 차트가
+        # 실제보다 일찍 끝난 것처럼 보인다 (정적 리포트도 같이 맞춰 뒀다)
+        if pick[-1] != len(gray) - 1:
+            pick = np.append(pick, len(gray) - 1)
+        gray = gray[pick]
+
+    x = d["tkout_time"].to_numpy()
+    return {
+        "x": x, "y": v.to_numpy(), "cd": cd, "grp": grp, "gray": gray,
+        "lot": d["root_lot_id"].map(norm_lot).to_numpy(),
+        "wafer": d["wafer_id"].map(norm_wafer).to_numpy(),
+        "spec_rows": spec_rows,
+        "x_min": x.min() if len(x) else None,
+        "x_max": x.max() if len(x) else None,
+    }
+
+
+def build_wac_scatter(pts: dict, item_col: str, selection: dict | None) -> go.Figure:
+    """WAC 그리드의 차트 하나. 선택된 wafer 는 모든 차트에서 같이 커진다."""
+    fig = go.Figure()
+    x, y, cd, grp = pts["x"], pts["y"], pts["cd"], pts["grp"]
+
+    for gi, (name, color, rank) in enumerate(WAC_GROUPS):
+        idx = pts["gray"] if gi == 0 else np.flatnonzero(grp == gi)
+        # 비어도 트레이스는 넣는다 -- 범례에 CL OUT / SL OUT 자리가 항상
+        # 있어야 "없는 것" 과 "안 그려진 것" 을 구분할 수 있다
+        fig.add_trace(go.Scatter(
+            x=x[idx], y=y[idx], mode="markers", name=name, legendrank=rank,
+            marker=dict(color=color, size=WAC_SIZE),
+            customdata=cd[idx], hovertemplate=HOVER_TEMPLATE,
+        ))
+
+    # 선택 표시는 바탕 위에 얹는 '덧그림' 두 개다. 선택이 없어도 빈 채로
+    # 넣어 트레이스 자리와 순서를 고정한다 -- 정적 리포트가 덧그림을 3, 4번
+    # 자리에 못 박아 두고 restyle 만 하는 것과 같은 구성이라, 한쪽을 고칠 때
+    # 다른 쪽에서 무엇을 고쳐야 하는지가 바로 보인다.
+    lot_gray = np.array([], dtype=int)
+    hit_idx = np.array([], dtype=int)
+    if selection:
+        same_lot = pts["lot"] == norm_lot(selection["root_lot_id"])
+        hit = same_lot & (pts["wafer"] == norm_wafer(selection["wafer_id"]))
+        # 같은 lot 은 회색 타점만 진하게. CL/SL 은 제 색을 잃으면 안 된다
+        lot_gray = np.flatnonzero(same_lot & ~hit & (grp == 0))
+        hit_idx = np.flatnonzero(hit)
+    # hoverinfo="skip" 은 이 트레이스의 클릭도 끈다 -- 덧그림을 눌러도
+    # 밑의 원래 타점이 잡히므로 클릭 처리가 한 곳으로 모인다
+    fig.add_trace(go.Scatter(
+        x=x[lot_gray], y=y[lot_gray], mode="markers",
+        marker=dict(color=WAC_SAME, size=WAC_SIZE),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # 고른 타점: 커지되 색은 자기 그룹 색 그대로 -- CL/SL 인지 계속 보인다
+    fig.add_trace(go.Scatter(
+        x=x[hit_idx], y=y[hit_idx], mode="markers",
+        marker=dict(color=np.array([g[1] for g in WAC_GROUPS])[grp[hit_idx]],
+                    size=WAC_SIZE_SEL),
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    add_limit_steps(fig, pts["spec_rows"], pts["x_min"], pts["x_max"])
+    fig.update_layout(
+        xaxis_title="tkout_time", yaxis_title=item_col,
+        legend=dict(font=dict(size=9), itemsizing="constant", tracegroupgap=0),
+        height=WAC_CHART_HEIGHT, margin=dict(t=24, b=34, l=52, r=12),
+        # 타점을 눌러 다시 그려도 확대/이동 상태는 그대로 둔다
+        uirevision=item_col,
+    )
+    return fig
+
+
+# 두 페이지의 h1 옆에 붙는 작은 회색 글씨. 0.42em 이라 h1 크기에 따라
+# 같이 줄고, streamlit 이 h1 을 몇 px 로 그리든 두 페이지가 같아 보인다.
+HEAD_META_STYLE = "font-size:0.42em; font-weight:400; color:#888; line-height:1.35;"
+PAGES = ["DC OCAP", "WAC Trend"]
+
+
+def clicked_customdata(chart_state):
+    """st.plotly_chart 위젯 상태 -> 눌린 타점의 customdata (없으면 None).
+
+    st.session_state[key] 로 미리 읽든, st.plotly_chart 가 돌려준 값을 쓰든
+    같은 물건이라 한 함수로 처리한다. 모양이 바뀌어도 죽지 않게 방어적으로
+    꺼낸다 -- 여기서 죽으면 화면 전체가 안 뜬다.
+    """
+    if not chart_state:
+        return None
+    selection = chart_state.get("selection") if hasattr(chart_state, "get") else None
+    points = selection.get("points") if hasattr(selection, "get") else None
+    if not points:
+        return None
+    first = points[0]
+    cd = first.get("customdata") if hasattr(first, "get") else None
+    return cd if cd else None
+
+
+def render_wac_page(product_dc: dict, trend_frames: dict, spec_frames: dict,
+                    data_loaded_at: str) -> None:
+    """제품 하나의 item 을 전부 작은 차트로 늘어놓는 화면.
+
+    타점을 누르면 그 wafer 가 모든 차트에서 같이 커지고, 같은 lot 의 회색
+    타점은 진한 회색이 된다. 정적 리포트의 WAC 페이지와 같은 화면이다.
+
+    정적 리포트는 스크롤에 맞춰 차트를 하나씩 그리지만(IntersectionObserver),
+    Streamlit 은 파이썬이 그린 그림을 통째로 넘기는 구조라 그럴 자리가 없다.
+    그래서 여기서는 한 번에 그릴 차트 수를 나눠서 넘긴다 -- 30개를 한꺼번에
+    넘기면 클릭 한 번에 수 MB 를 다시 실어보내게 된다.
+    """
+    products = list(product_dc.keys())
+    sel_key = f"{KEY_PREFIX}wac_selected"
+    counts = ", ".join(f"{p} : {len(item_columns(trend_frames[p]))}건" for p in products)
+    st.markdown(
+        f"# WAC Trend "
+        f"<span style='display:inline-block; vertical-align:bottom; {HEAD_META_STYLE}'>"
+        f"WAC item 수<br>{counts}</span>",
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([2, 3])
+    with left:
+        title_col, search_col = st.columns([1.3, 3.35])
+        with title_col:
+            st.markdown(
+                "<div style='font-size:1.15rem; font-weight:700; padding-top:0.3rem;'>"
+                "ITEM Trend</div>",
+                unsafe_allow_html=True,
+            )
+        with search_col:
+            search = st.text_input(
+                "item 검색", placeholder="item_id 검색 (예: item3)",
+                label_visibility="collapsed", key=f"{KEY_PREFIX}wac_search",
+            )
+        # DC OCAP 페이지와 같은 key 를 쓴다 -- 정적 리포트처럼 두 화면이
+        # 제품 선택을 공유해서, 페이지를 옮겨도 보던 제품이 그대로 남는다
+        product = st.segmented_control(
+            "제품", products, default=products[0], required=True,
+            label_visibility="collapsed", key=f"{KEY_PREFIX}product_switch",
+            width="stretch",
+        ) or products[0]
+    with right:
+        # DC HOLD LINK 는 이 페이지에 없다 -- hold 를 푸는 화면이 아니다
+        st.markdown(
+            f"<div style='text-align:right; font-size:0.8rem; color:#888;'>"
+            f"(Latest Data : {data_loaded_at})</div>",
+            unsafe_allow_html=True,
+        )
+
+    q = (search or "").strip().lower()
+    items = [c for c in item_columns(trend_frames[product])
+             if not q or q in str(c).lower()]
+    if not items:
+        st.info(f'"{search}" 와 맞는 item 이 없습니다.' if q
+                else "이 제품의 trend 에 item 컬럼이 없습니다.")
+        return
+
+    selection = st.session_state.get(sel_key)
+    # 선택은 제품을 넘어가면 뜻이 없다 (다른 제품엔 그 wafer 가 없다)
+    if selection and selection.get("product") != product:
+        selection = None
+        st.session_state[sel_key] = None
+
+    seen_key = f"{KEY_PREFIX}wac_seen"
+    nonce_key = f"{KEY_PREFIX}wac_nonce"
+    seen = st.session_state.setdefault(seen_key, {})
+    nonce = st.session_state.setdefault(nonce_key, 0)
+
+    # 선택 문구가 들어갈 자리를 먼저 잡아둔다. 클릭은 아래에서 차트를
+    # 그리기 직전에 읽는데, 그 결과를 여기 위에 써야 하기 때문이다.
+    msg_slot = st.container()
+
+    # 한 번에 그릴 차트 수. 클릭 한 번에 이만큼을 다시 그려 브라우저로
+    # 넘기므로, item 이 많은 제품에서 이걸 키우면 클릭이 그만큼 느려진다.
+    per_page = st.session_state.setdefault(f"{KEY_PREFIX}wac_per_page", 10)
+    n_pages = max(1, -(-len(items) // per_page))
+    page_idx = 0
+    if n_pages > 1:
+        nav_col, size_col, _sp = st.columns([2, 1.4, 4])
+        with nav_col:
+            page_idx = st.select_slider(
+                "차트 페이지",
+                options=list(range(n_pages)),
+                format_func=lambda i: f"{i * per_page + 1}~"
+                                      f"{min((i + 1) * per_page, len(items))} / {len(items)}",
+                key=f"{KEY_PREFIX}wac_page_idx_{product}_{q}_{per_page}",
+                label_visibility="collapsed",
+            )
+        with size_col:
+            new_size = st.selectbox(
+                "한 번에", [4, 10, 20, 50], index=[4, 10, 20, 50].index(per_page),
+                format_func=lambda n: f"{n}개씩", label_visibility="collapsed",
+                key=f"{KEY_PREFIX}wac_per_page_pick",
+            )
+            if new_size != per_page:
+                st.session_state[f"{KEY_PREFIX}wac_per_page"] = new_size
+                st.rerun()
+    shown = items[page_idx * per_page:(page_idx + 1) * per_page]
+    chart_keys = {c: f"{KEY_PREFIX}wac_chart_{product}_{c}_{nonce}" for c in shown}
+
+    # 차트를 그리기 '전에' 위젯 상태를 읽는다. st.plotly_chart 가 돌려주는
+    # 값은 st.session_state[key] 와 같은 것이라, 그리는 도중에 확인하면
+    # 앞쪽 차트는 이미 옛 선택으로 그려진 뒤라서 st.rerun() 으로 한 바퀴를
+    # 더 돌아야 한다. 먼저 읽으면 클릭 한 번에 페이지를 두 번 그리던 것이
+    # 한 번으로 준다 (차트가 10개면 그림 10장을 덜 만들어 덜 보낸다).
+    #
+    # '어느 차트가 방금 눌린 것인가' 는 상태만 봐서는 알 수 없다 -- 눌렸던
+    # 차트는 그 뒤로도 계속 같은 점을 보고하기 때문이다. 그래서 차트마다
+    # 마지막으로 본 값을 seen 에 적어두고, 그것과 달라진 차트만 새 클릭으로
+    # 친다.
+    for item_col in shown:
+        key = chart_keys[item_col]
+        cd = clicked_customdata(st.session_state.get(key))
+        pair = (cd[0], cd[1]) if cd else None
+        if seen.get(key) != pair:
+            seen[key] = pair
+            if pair is not None:
+                selection = {"product": product,
+                             "root_lot_id": pair[0], "wafer_id": pair[1]}
+                st.session_state[sel_key] = selection
+
+    with msg_slot:
+        msg_col, clear_col = st.columns([6, 1])
+        with msg_col:
+            if selection:
+                st.markdown(
+                    f"<div style='font-size:0.85rem; color:#d33; font-weight:600;'>"
+                    f"선택한 wafer : {norm_lot(selection['root_lot_id'])} "
+                    f"#{norm_wafer(selection['wafer_id'])}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.caption("타점을 누르면 그 wafer 가 모든 차트에서 같이 커집니다.")
+        with clear_col:
+            # 정적 리포트는 같은 타점을 다시 눌러 해제하지만, Streamlit 은
+            # 같은 점을 다시 눌러도 위젯 값이 그대로라 아무 일도 일어나지
+            # 않는다. 그래서 해제는 버튼으로 둔다. nonce 를 올려 차트 key 를
+            # 통째로 바꾸는 이유는, 안 그러면 차트들이 방금 해제한 선택을
+            # 계속 들고 있어서 같은 타점을 다시 눌러도 '바뀐 게 없다' 가
+            # 되기 때문이다.
+            if selection and st.button("선택 해제", key=f"{KEY_PREFIX}wac_clear",
+                                       width="stretch"):
+                st.session_state[sel_key] = None
+                st.session_state[nonce_key] = nonce + 1
+                st.session_state[seen_key] = {}
+                st.rerun()
+
+    stamp = data_loaded_at
+    for row_start in range(0, len(shown), WAC_GRID_COLS):
+        cols = st.columns(WAC_GRID_COLS)
+        for col, item_col in zip(cols, shown[row_start:row_start + WAC_GRID_COLS]):
+            with col, st.container(border=True):
+                st.markdown(
+                    f"<div style='font-weight:700; font-size:0.95rem;'>{item_col}</div>",
+                    unsafe_allow_html=True,
+                )
+                pts = wac_item_points(product, item_col, stamp)
+                if pts["spec_rows"].empty:
+                    # 관리선이 없으면 OUT 판정을 할 수 없어 전부 회색이 된다.
+                    # 그 사실을 안 적어두면 "이 item 은 다 정상" 으로 읽힌다.
+                    st.markdown(
+                        f"<div style='font-size:0.75rem; color:#b45309;'>"
+                        f"관리선 없음 (spec 에 {item_col} 이 없습니다)</div>",
+                        unsafe_allow_html=True,
+                    )
+                key = chart_keys[item_col]
+                event = st.plotly_chart(
+                    build_wac_scatter(pts, item_col, selection),
+                    width="stretch", on_select="rerun", selection_mode="points",
+                    key=key,
+                )
+                # 보통은 위에서 미리 읽어 이미 반영돼 있다. 여기는 그게
+                # 빗나갔을 때를 위한 그물이다 (streamlit 이 위젯 상태를
+                # 담는 모양을 바꾸면 위쪽 사전 확인이 조용히 아무것도 못
+                # 찾게 되는데, 그러면 클릭이 통째로 안 먹는다).
+                cd = clicked_customdata(event)
+                if cd:
+                    pair = (cd[0], cd[1])
+                    if seen.get(key) != pair:
+                        seen[key] = pair
+                        st.session_state[sel_key] = {
+                            "product": product,
+                            "root_lot_id": pair[0], "wafer_id": pair[1],
+                        }
+                        # 이미 그린 차트들은 옛 선택으로 그려져 있다. 여기서
+                        # 다시 돌려야 모든 차트에 한꺼번에 반영된다.
+                        st.rerun()
+
+
+# ====================================================================
 # 🖥️ Streamlit 메인 화면 UI 구성 (DC OCAP List + Item Trend)
 # ====================================================================
 def show_dc_ocap():
@@ -1139,13 +1497,9 @@ def show_dc_ocap():
     with layout="wide" -- that call can only happen once per app and
     must be the first streamlit command, so it doesn't belong in here.
     """
-    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
-     uly_spec, sol_spec, tts_spec,
-     data_loaded_at, problems, data_warnings) = load_data()
-
-    trend_frames = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    spec_frames = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
-    product_dc = {"ULY": uly_dc, "TTS": tts_dc, "SOL": sol_dc}
+    frames = load_data()
+    data_loaded_at, problems, data_warnings = frames[-3:]
+    product_dc, trend_frames, spec_frames = frames_by_product(frames)
 
     if problems:
         st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -1160,24 +1514,11 @@ def show_dc_ocap():
             for w in data_warnings:
                 st.write("- " + w)
 
-    # the counts sit inside the h1 so their 0.42em resolves against the same
-    # heading size -- that keeps them consistent without having to hardcode
-    # whatever px streamlit's h1 currently renders at. "Latest Data" used to
-    # sit here too but now rides just above the trend panel, next to the
-    # DC HOLD link.
-    meta_style = "font-size:0.42em; font-weight:400; color:#888; line-height:1.35;"
-    new_counts = ", ".join(f"{p} : {count_new_holds(product_dc[p])}건" for p in product_dc)
-    st.markdown(
-        f"# Hold 현황 "
-        f"<span style='display:inline-block; vertical-align:bottom; {meta_style}'>"
-        f"신규 hold 건수<br>{new_counts}</span>",
-        unsafe_allow_html=True,
-    )
-
     # the comment box is a disabled (read-only) text_area, which streamlit
     # renders in light gray by default; override to black and slightly larger
     # so it's actually legible. -webkit-text-fill-color is needed too since
     # some browsers ignore `color` on a disabled field and only honor this.
+    # Drawn before the page switch below, since both pages use these rules.
     st.markdown(
         """
         <style>
@@ -1209,6 +1550,30 @@ def show_dc_ocap():
         a.dc-hold-link:hover { background: #fff1f0; border-color: #d33; }
         </style>
         """,
+        unsafe_allow_html=True,
+    )
+
+    # 최상단 페이지 전환. 정적 리포트와 같은 두 화면이고 기본은 DC OCAP.
+    # required=True 는 여기서도 같은 이유다 -- 없으면 눌린 걸 다시 눌러
+    # 아무 페이지도 안 골라진 상태가 된다.
+    page = st.segmented_control(
+        "페이지", PAGES, default=PAGES[0], required=True,
+        label_visibility="collapsed", key=f"{KEY_PREFIX}page",
+    ) or PAGES[0]
+    if page == "WAC Trend":
+        render_wac_page(product_dc, trend_frames, spec_frames, data_loaded_at)
+        return
+
+    # the counts sit inside the h1 so their 0.42em resolves against the same
+    # heading size -- that keeps them consistent without having to hardcode
+    # whatever px streamlit's h1 currently renders at. "Latest Data" used to
+    # sit here too but now rides just above the trend panel, next to the
+    # DC HOLD link.
+    new_counts = ", ".join(f"{p} : {count_new_holds(product_dc[p])}건" for p in product_dc)
+    st.markdown(
+        f"# Hold 현황 "
+        f"<span style='display:inline-block; vertical-align:bottom; {HEAD_META_STYLE}'>"
+        f"신규 hold 건수<br>{new_counts}</span>",
         unsafe_allow_html=True,
     )
 
@@ -1657,12 +2022,9 @@ def _spec_for_export(spec_df) -> pd.DataFrame:
 
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
-    (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
-     uly_spec, sol_spec, tts_spec) = pull_data()
-
-    product_dc = {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc}
-    product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
-    product_spec = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
+    # 제품 순서까지 한 곳에서 정한다. 여기서 순서가 어긋나면 리포트 머리글의
+    # 건수만 제품 전환 버튼과 다른 순서로 나온다 (예전에 그랬다).
+    product_dc, product_trend, product_spec = frames_by_product(pull_data())
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
