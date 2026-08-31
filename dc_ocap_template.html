@@ -83,6 +83,13 @@
 
   #listPanel { height: 400px; }
   #detailPanel { height: 250px; margin-top: 10px; }
+  /* 표가 든 패널은 위쪽 패딩을 0 으로 둔다. sticky 는 스크롤 컨테이너의
+     '패딩 안쪽' 을 기준으로 붙으므로, padding-top 이 있으면 고정된 헤더가
+     그만큼 내려앉고 그 위 빈 띠로 스크롤되는 행이 비쳐 보인다.
+     여백은 첫 자식에게 옮겨 준다 -- 그건 같이 스크롤되면 되는 것이라
+     헤더 밑으로 지나가도 상관없다. */
+  #listPanel, #detailPanel { padding-top: 0; }
+  #listPanel > :first-child, #detailPanel > :first-child { margin-top: 10px; }
   /* trend 는 왼쪽 list 와 같은 높이, comment 는 detail 과 같은 높이 */
   #trendPanel { height: 400px; }
   #commentPanel { height: 250px; margin-top: 10px; }
@@ -259,9 +266,25 @@
           <div class="wac-stats-body" id="wacStatGrowth"></div>
         </div>
       </div>
-      <!-- 오른쪽 절반은 비워둔 자리. 여기에 뭘 더 넣게 되면 이 div 안에
-           .wac-stats 를 하나 더 두면 왼쪽과 같은 모양/높이로 맞는다. -->
-      <div id="wacStatsSpare"></div>
+      <!-- 오른쪽 절반: 설비/probe card 쪽 요약. 왼쪽이 '언제/무엇' 이라면
+           이쪽은 '어디서' 다. -->
+      <div class="wac-stats">
+        <div class="wac-stat">
+          <div class="wac-stat-title" title="측정 건수 대비 hold 건수. (eqp, item) 조합별.">
+            eqp별 OCAP률 TOP5</div>
+          <div class="wac-stats-body" id="wacStatEqp"></div>
+        </div>
+        <div class="wac-stat">
+          <div class="wac-stat-title" title="측정 건수 대비 hold 건수. (probe card, item) 조합별.">
+            probe card별 OCAP률 TOP5</div>
+          <div class="wac-stats-body" id="wacStatCard"></div>
+        </div>
+        <div class="wac-stat">
+          <div class="wac-stat-title" title="item 마다 probe card 별 median 을 내고, 그 중 최대와 최소의 차. 카드끼리 측정이 어긋나는 item 을 찾는 값이다.">
+            card간 median 차 TOP5</div>
+          <div class="wac-stats-body" id="wacStatSpread"></div>
+        </div>
+      </div>
     </div>
     <div id="wacSelected" class="wac-selected"></div>
     <div id="wacGrid" class="wac-grid"></div>
@@ -1393,6 +1416,117 @@ function wacStats(product) {
   };
 }
 
+// 설비/probe card 쪽 요약. dc 에는 eqp_id 도 probe_card_id 도 없어서
+// (root_lot_id, wafer_id) 로 trend 에 이어 붙여야 나온다.
+//
+// 표본이 적으면 비율은 거짓말을 한다 -- 3번 측정해서 1번 걸리면 33% 다.
+// 그래서 아래 두 기준을 넘긴 조합만 순위에 올린다.
+const MIN_MEASURED = 20;    // OCAP률: (eqp|card, item) 측정 건수
+const MIN_PER_CARD = 10;    // median 차: card 하나당 측정 건수
+
+function median(sorted) {
+  const m = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+}
+
+const _wacQualCache = new Map();
+function wacQualityStats(product) {
+  if (_wacQualCache.has(product)) return _wacQualCache.get(product);
+  const trend = DATA.trend[product] || [];
+  const items = DATA.itemCols[product] || [];
+  const itemByKey = new Map(items.map(c => [String(c).trim().toLowerCase(), c]));
+
+  // wafer 한 장의 trend 행들 (재측정이면 여러 개, tkout 순)
+  const byWafer = new Map();
+  for (const r of trend) {
+    const k = pairKey(r.root_lot_id, r.wafer_id);
+    let a = byWafer.get(k);
+    if (!a) byWafer.set(k, a = []);
+    a.push(r);
+  }
+  for (const a of byWafer.values()) {
+    a.sort((x, y) => (x.tkout_time < y.tkout_time ? -1 : x.tkout_time > y.tkout_time ? 1 : 0));
+  }
+
+  // 분모: (설비, item) 별 측정 건수. 겸사겸사 median 용으로 card 별 값도 모은다
+  const measured = { eqp_id: new Map(), probe_card_id: new Map() };
+  const byCardValues = new Map();          // item -> Map(card -> [값])
+  for (const r of trend) {
+    for (const it of items) {
+      const raw = r[it];
+      if (raw === null || raw === undefined) continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v)) continue;
+      for (const f of ["eqp_id", "probe_card_id"]) {
+        const key = String(r[f]) + "||" + it;
+        measured[f].set(key, (measured[f].get(key) || 0) + 1);
+      }
+      let m = byCardValues.get(it);
+      if (!m) byCardValues.set(it, m = new Map());
+      const card = String(r.probe_card_id);
+      let arr = m.get(card);
+      if (!arr) m.set(card, arr = []);
+      arr.push(v);
+    }
+  }
+
+  // 분자: hold. dc 한 건을 그 wafer/item 의 '첫 측정' 에 붙인다 -- dc 의
+  // rw_cnt 는 hold 이벤트 번호지 측정 회차가 아니라서 회차로는 못 맞춘다.
+  // 같은 wafer/item 이 rework 로 여러 번 걸려도 설비 탓은 한 번만 센다.
+  const held = { eqp_id: new Map(), probe_card_id: new Map() };
+  const counted = new Set();
+  for (const d of (DATA.dc[product] || [])) {
+    const it = itemByKey.get(String(d.item_id).trim().toLowerCase());
+    if (!it) continue;
+    const k = pairKey(d.root_lot_id, d.wafer_id);
+    if (counted.has(k + "||" + it)) continue;
+    counted.add(k + "||" + it);
+    const row = (byWafer.get(k) || []).find(r => {
+      const raw = r[it];
+      return raw !== null && raw !== undefined && Number.isFinite(Number(raw));
+    });
+    if (!row) continue;                    // trend 에 없는 wafer (기간 밖 등)
+    for (const f of ["eqp_id", "probe_card_id"]) {
+      const key = String(row[f]) + "||" + it;
+      held[f].set(key, (held[f].get(key) || 0) + 1);
+    }
+  }
+
+  const rateTop = (field) => {
+    const out = [];
+    for (const [key, n] of measured[field]) {
+      if (n < MIN_MEASURED) continue;
+      const h = held[field].get(key) || 0;
+      if (!h) continue;                    // 0% 를 줄 세워봐야 의미가 없다
+      const cut = key.lastIndexOf("||");
+      out.push({ who: key.slice(0, cut), item: key.slice(cut + 2),
+                 rate: h / n, held: h, measured: n });
+    }
+    out.sort((a, b) => b.rate - a.rate || b.held - a.held);
+    return out.slice(0, 5);
+  };
+
+  // card 별 median 을 내고 최대-최소. 카드가 둘 이상 있어야 '차이' 가 있다
+  const spread = [];
+  for (const [it, byCard] of byCardValues) {
+    let hi = null, lo = null;
+    for (const [card, arr] of byCard) {
+      if (arr.length < MIN_PER_CARD) continue;
+      const med = median(arr.slice().sort((x, y) => x - y));
+      if (!hi || med > hi.med) hi = { card, med, n: arr.length };
+      if (!lo || med < lo.med) lo = { card, med, n: arr.length };
+    }
+    if (!hi || !lo || hi.card === lo.card) continue;
+    spread.push({ item: it, diff: hi.med - lo.med, hi, lo });
+  }
+  spread.sort((a, b) => b.diff - a.diff);
+
+  const out = { eqp: rateTop("eqp_id"), card: rateTop("probe_card_id"),
+                spread: spread.slice(0, 5) };
+  _wacQualCache.set(product, out);
+  return out;
+}
+
 const WAC_STATS_LAYOUT = {
   height: 132, margin: { t: 8, b: 26, l: 40, r: 10 },
   showlegend: false, dragmode: false,
@@ -1487,6 +1621,47 @@ function renderWacStats() {
     }
     growthBody.appendChild(table);
   }
+
+  // ---- 오른쪽: 설비 / probe card ----
+  const q = wacQualityStats(state.product);
+
+  // 표 하나 만드는 자리. rows 는 [칸, 칸, ...] 배열과 마지막 칸의 class/title
+  const buildTable = (bodyId, headers, rows, emptyText) => {
+    const body = slot(bodyId);
+    if (!rows.length) return note(body, emptyText);
+    const table = el("table", { class: "wac-stats-table" });
+    const head = el("tr");
+    headers.forEach(h => head.appendChild(el("th", { text: h })));
+    table.appendChild(head);
+    for (const r of rows) {
+      const tr = el("tr");
+      r.cells.forEach((c, i) => {
+        const td = el("td", { text: c });
+        if (i === r.cells.length - 1 && r.cls) td.className = r.cls;
+        if (r.title) td.title = r.title;
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+  };
+
+  const pct = (x) => (x * 100).toFixed(x < 0.1 ? 1 : 0) + "%";
+  const rateRows = (list) => list.map(r => ({
+    cells: [r.who, r.item, pct(r.rate)], cls: "up",
+    title: `hold ${r.held}건 / 측정 ${r.measured}건`,
+  }));
+  const noSample = `측정 ${MIN_MEASURED}건 이상인 조합 중 hold 가 있는 것이 없습니다.`;
+
+  buildTable("wacStatEqp", ["eqp", "item", "OCAP률"], rateRows(q.eqp), noSample);
+  buildTable("wacStatCard", ["card", "item", "OCAP률"], rateRows(q.card), noSample);
+  buildTable("wacStatSpread", ["item", "차이", "card"], q.spread.map(r => ({
+    cells: [r.item, r.diff.toFixed(2), `${r.hi.card}↔${r.lo.card}`],
+    // 측정 건수도 같이 보여준다. 몇십 건짜리 median 차는 대개 우연이라,
+    // 이 숫자를 봐야 진짜 카드 편차인지 판단할 수 있다
+    title: `${r.hi.card} median ${r.hi.med.toFixed(2)} (n=${r.hi.n}) / `
+           + `${r.lo.card} median ${r.lo.med.toFixed(2)} (n=${r.lo.n})`,
+  })), `card 하나당 ${MIN_PER_CARD}건 이상 측정된 item 이 없습니다.`);
 }
 
 function renderWac() {
