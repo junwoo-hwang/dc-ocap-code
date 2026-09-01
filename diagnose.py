@@ -184,6 +184,53 @@ def check_spec(product_spec, product_trend):
                      "해당 차트는 관리선 없이 회색으로만 그려집니다.")
 
 
+def check_split(product_split, product_trend):
+    """EIN/ECN 적용 이력. 아직 화면에 쓰지는 않지만, 한 테이블을 process_id
+    로 잘라 만드는 것이라 '잘못 잘라서 통째로 빈' 경우가 제일 흔하다."""
+    expected = {name: cfg["process_id"] for name, cfg in app.PRODUCT_CONFIG.items()}
+    wafer_cols = [str(n) for n in range(1, 26)]
+    for name, df in product_split.items():
+        if not isinstance(df, pd.DataFrame):
+            print(f"  {name.lower()}_split: !! DataFrame 이 아님 ({type(df).__name__})")
+            note(2, f"{name.lower()}_split 가 DataFrame 이 아님")
+            continue
+        line = f"  {name.lower()}_split: {len(df):>7,} 행"
+        if df.empty:
+            print(line + f"   << 비어 있음! (process_id == '{expected[name]}' 로 잘랐는지 확인)")
+            note(2, f"{name.lower()}_split 가 비어 있음",
+                 f"split 을 process_id == '{expected[name]}' 로 자르는 부분을 확인하세요.")
+            continue
+        # 자를 때 제품을 바꿔 넣으면 여기서 바로 드러난다
+        got = sorted(str(v) for v in df.get("process_id", pd.Series(dtype=str)).unique())
+        if got != [expected[name]]:
+            print(line + f"   !! process_id 가 {got} 입니다 ('{expected[name]}' 여야 함)")
+            note(1, f"{name.lower()}_split 의 process_id 가 다름",
+                 f"들어온 값: {got} / 기대값: {expected[name]}",
+                 "split 을 자르는 순서나 조건이 제품과 어긋났습니다.")
+            continue
+        missing = [c for c in wafer_cols if c not in df.columns]
+        if missing:
+            print(line + f"   !! wafer 칸이 없음 -> {missing[:5]}{' ...' if len(missing) > 5 else ''}")
+            note(2, f"{name.lower()}_split 에 wafer 칸(1~25)이 없음",
+                 f"없는 칸: {missing[:5]}",
+                 "comp_id_list 를 1~25 칸으로 펼치는 단계가 빠졌는지 확인하세요.")
+            continue
+        marks = (df[wafer_cols] == "V").sum(axis=1)
+        blank = int((marks == 0).sum())
+        print(line + f"  (V 없는 행 {blank}건, 행마다 V {int(marks.min())}~{int(marks.max())}개)")
+        if blank:
+            note(3, f"[{name}] split 에 V 가 하나도 없는 행 {blank}건",
+                 "wafer 를 하나도 안 건드린 건이라, 보통은 앞 단계에서 버립니다.")
+        tr = product_trend.get(name)
+        if isinstance(tr, pd.DataFrame) and not tr.empty and "root_lot_id" in df.columns:
+            unknown = set(df["root_lot_id"]) - set(tr["root_lot_id"])
+            if unknown:
+                print(f"          (참고) trend 에 없는 lot {len(unknown)}개: "
+                      f"{sorted(map(str, unknown))[:3]}")
+                note(3, f"[{name}] split 의 lot 중 trend 에 없는 것 {len(unknown)}개",
+                     "조회 기간이 서로 다르면 정상입니다.")
+
+
 def check_check_data(product_dc, product_trend, product_spec):
     result = safe("check_data()", app.check_data, product_dc, product_trend, product_spec)
     if result is None:
@@ -653,21 +700,24 @@ def main():
               "(조회 권한 / 쿼리 문법 / 접속 정보 등).")
         return
 
-    if not isinstance(frames, (tuple, list)) or len(frames) != 9:
+    if not isinstance(frames, (tuple, list)) or len(frames) != 12:
         n = len(frames) if hasattr(frames, "__len__") else "?"
-        print(f"!! 9개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
+        print(f"!! 12개를 return 해야 하는데 {type(frames).__name__} ({n}개) 를 돌려줬습니다.")
         print("   순서: uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,")
-        print("         uly_spec, sol_spec, tts_spec")
+        print("         uly_spec, sol_spec, tts_spec, uly_split, sol_split, tts_split")
         print("   spec_* 는 (item_id, from_time, ucl, lcl, usl, lsl) 개정 이력입니다.")
+        print("   split_* 는 EIN/ECN 적용 이력입니다 (split 을 process_id 로 나눈 것).")
         return
 
     (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
-     uly_spec, sol_spec, tts_spec) = frames
+     uly_spec, sol_spec, tts_spec, uly_split, sol_split, tts_split) = frames
     product_dc = {"ULY": uly_dc, "SOL": sol_dc, "TTS": tts_dc}
     product_trend = {"ULY": uly_trend, "SOL": sol_trend, "TTS": tts_trend}
     product_spec = {"ULY": uly_spec, "SOL": sol_spec, "TTS": tts_spec}
+    product_split = {"ULY": uly_split, "SOL": sol_split, "TTS": tts_split}
     safe("1단계", check_shapes, product_dc, product_trend)
     safe("1단계(spec)", check_spec, product_spec, product_trend)
+    safe("1단계(split)", check_split, product_split, product_trend)
 
     head("2. 컬럼 이름 확인 (대시보드가 요구하는 것 대비)")
     safe("2단계", check_columns, product_dc, product_trend)

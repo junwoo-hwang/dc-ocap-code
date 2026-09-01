@@ -15,8 +15,11 @@ merged into dc -- comment, then owner and code -- shown read-only.
 ======================================================================
 DATA PREP (mock — stands in for the real pull, which can't be shared
 here). Replace this whole section with the real company-system pull;
-it only has to end up with pull_data() returning these six dataframes:
-uly_dc / sol_dc / tts_dc and uly_trend / sol_trend / tts_trend.
+it only has to end up with pull_data() returning these twelve dataframes,
+in this order: uly_dc / sol_dc / tts_dc, uly_trend / sol_trend /
+tts_trend, uly_spec / sol_spec / tts_spec, uly_split / sol_split /
+tts_split. The order is the contract -- the dashboard reads them by
+position, not by name.
 
 Keep the pull inside pull_data() rather than at module level: Streamlit
 re-runs this file top to bottom on every click, so module-level code
@@ -464,29 +467,21 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
     ]
 
 
-def pull_split_data():
-    """Return the EIN/ECN split frames x3 (ULY, SOL, TTS in that order).
-
-    Kept apart from pull_data() on purpose: pull_data()'s 9-frame return is
-    what the dashboard and diagnose.py are written against, and nothing on
-    the screen reads split yet. Swap this one for the real datalake pull
-    (제품_split x3) at the same time as pull_data(), and fold it into that
-    return once something below the marker actually needs it.
-    """
-    uly_split = generate_split_for_product("ULY", generate_probe_df("ULY"), seed=301)
-    sol_split = generate_split_for_product("SOL", generate_probe_df("SOL"), seed=302)
-    tts_split = generate_split_for_product("TTS", generate_probe_df("TTS"), seed=303)
-    return uly_split, sol_split, tts_split
-
-
 def pull_data():
-    """Return dc x3, trend x3, spec x3 (ULY, SOL, TTS in that order).
+    """Return dc x3, trend x3, spec x3, split x3 (ULY, SOL, TTS each time).
 
     spec_* holds the control limits as revisions --
     (item_id, from_time, ucl, lcl, usl, lsl), one row per time the spec
     changed. They are not in dc because the spec in force changes over
     time: a wafer measured in July and one measured in August are judged
     against different numbers, and the chart steps on the date it changed.
+
+    split_* is the EIN/ECN application history, one frame per product --
+    in the real pull, one `split` table sliced on process_id
+    (KNNU=ULY, KNJO=SOL, KNIK=TTS). Mind the order below: this function
+    returns ULY, SOL, TTS, so slicing them out in a different order and
+    returning them as written would quietly label one product's splits
+    with another's name.
 
     Put the real company-system pull in here. It must be a function, not
     bare module-level code: Streamlit re-runs this file top to bottom on
@@ -505,9 +500,14 @@ def pull_data():
     sol_spec = generate_spec_for_product("SOL", sol_trend)
     tts_spec = generate_spec_for_product("TTS", tts_trend)
 
+    uly_split = generate_split_for_product("ULY", uly_trend, seed=301)
+    sol_split = generate_split_for_product("SOL", sol_trend, seed=302)
+    tts_split = generate_split_for_product("TTS", tts_trend, seed=303)
+
     return (uly_dc, sol_dc, tts_dc,
             uly_trend, sol_trend, tts_trend,
-            uly_spec, sol_spec, tts_spec)
+            uly_spec, sol_spec, tts_spec,
+            uly_split, sol_split, tts_split)
 
 
 # ======================================================================
@@ -979,20 +979,25 @@ def check_data(product_dc: dict, trend_frames: dict,
     return fatal, warnings
 
 
-def frames_by_product(frames) -> tuple[dict, dict, dict]:
-    """pull_data() 의 9개 튜플 -> (dc, trend, spec) 제품별 dict 3개.
+def frames_by_product(frames) -> tuple[dict, dict, dict, dict]:
+    """pull_data() 의 12개 튜플 -> (dc, trend, spec, split) 제품별 dict 4개.
 
     순서로 받은 걸 이름으로 바꾸는 자리는 여기 하나뿐이다. 여러 군데서
     각자 풀면 한 곳만 순서를 잘못 적어도 조용히 다른 제품 데이터를 그리게
     된다. load_data() 가 뒤에 붙이는 loaded_at/problems/warnings 도 그대로
     넘길 수 있도록 남는 건 무시한다.
+
+    split 은 아직 화면에서 읽는 데가 없다. 그래도 여기서 같이 이름을
+    붙여 두는 이유는, 나중에 쓸 때 다른 데서 순서로 풀지 않게 하려는 것이다.
     """
     (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
-     uly_spec, sol_spec, tts_spec, *_rest) = frames
+     uly_spec, sol_spec, tts_spec, uly_split, sol_split, tts_split,
+     *_rest) = frames
     # 순서는 화면의 제품 전환 버튼과 같게 둔다 (ULY / TTS / SOL)
     return ({"ULY": uly_dc, "TTS": tts_dc, "SOL": sol_dc},
             {"ULY": uly_trend, "TTS": tts_trend, "SOL": sol_trend},
-            {"ULY": uly_spec, "TTS": tts_spec, "SOL": sol_spec})
+            {"ULY": uly_spec, "TTS": tts_spec, "SOL": sol_spec},
+            {"ULY": uly_split, "TTS": tts_split, "SOL": sol_split})
 
 
 # Streamlit re-runs show_dc_ocap() on every click (the portal reruns its
@@ -1006,7 +1011,8 @@ def load_data():
     frames = pull_data()
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
-    problems, warnings = check_data(*frames_by_product(frames))
+    dc_frames, trend_frames, spec_frames, _split_frames = frames_by_product(frames)
+    problems, warnings = check_data(dc_frames, trend_frames, spec_frames)
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
     loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
@@ -1301,7 +1307,7 @@ def wac_item_points(product: str, item_col: str, stamp: str) -> dict:
     비싸다. 대신 값싼 문자열을 키로 쓰고 프레임은 (이미 캐시된) load_data()
     에서 가져온다 -- 데이터가 새로 적재되면 stamp 가 바뀌어 같이 무효화된다.
     """
-    _dc, trend_frames, spec_frames = frames_by_product(load_data())
+    _dc, trend_frames, spec_frames, _split = frames_by_product(load_data())
     trend_df, spec_df = trend_frames[product], spec_frames[product]
 
     vals = pd.to_numeric(trend_df[item_col], errors="coerce")
@@ -1635,7 +1641,7 @@ def show_dc_ocap():
     """
     frames = load_data()
     data_loaded_at, problems, data_warnings = frames[-3:]
-    product_dc, trend_frames, spec_frames = frames_by_product(frames)
+    product_dc, trend_frames, spec_frames, _split_frames = frames_by_product(frames)
 
     if problems:
         st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
@@ -2160,7 +2166,7 @@ def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
     # 제품 순서까지 한 곳에서 정한다. 여기서 순서가 어긋나면 리포트 머리글의
     # 건수만 제품 전환 버튼과 다른 순서로 나온다 (예전에 그랬다).
-    product_dc, product_trend, product_spec = frames_by_product(pull_data())
+    product_dc, product_trend, product_spec, _product_split = frames_by_product(pull_data())
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
