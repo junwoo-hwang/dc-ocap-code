@@ -2185,13 +2185,32 @@ def _spec_for_export(spec_df) -> pd.DataFrame:
             .sort_values(["item_id", "from_time", *LIMIT_COLS], na_position="first"))
 
 
-def _split_for_export(split_df) -> pd.DataFrame:
+def reachable_lots(dc_df, trend_df) -> set:
+    """EINECN 버튼이 열릴 수 있는 root_lot_id 전부.
+
+    버튼은 리스트에서 고른 hold 의 lot, 아니면 차트에서 누른 타점의 lot 으로
+    열린다. 차트에는 그 item 의 trend 타점이 전부(회색 배경까지) 찍히고 아무
+    거나 누를 수 있으므로, dc 의 lot 뿐 아니라 trend 의 lot 도 다 열릴 수 있다.
+    """
+    lots = set()
+    for df in (dc_df, trend_df):
+        if isinstance(df, pd.DataFrame) and "root_lot_id" in df.columns:
+            lots |= {norm_lot(v) for v in df["root_lot_id"]}
+    return lots
+
+
+def _split_for_export(split_df, keep_lots=None) -> pd.DataFrame:
     """split 을 EINECN 팝업이 쓸 모양으로: 필요한 칸만, 정해진 순서로.
 
     einecn_no 하나가 step 여러 개에 걸린다 -- 하나의 test 를 step 여럿에
     묶어서 돌리기 때문이다. 그러니 einecn_no 로 묶어 한 줄로 접으면 안 되고,
     step 마다 한 줄로 둔다 (step 이 다르면 적용된 wafer 도 다르다). 대신
     einecn_no 로 먼저 정렬해서 같은 test 의 step 들이 붙어 나오게 한다.
+
+    keep_lots 를 주면 그 lot 의 행만 남긴다. split 은 라인 전체 이력이라
+    dc/trend 조회 기간 밖의 lot 이 잔뜩 들어 있는데, 그 lot 은 화면에서
+    고를 수가 없으니 팝업도 열릴 수가 없다. 실을 이유가 없는 데이터다
+    (실측: 그런 행이 65% 면 payload 1.82MB -> 0.64MB).
     """
     if not isinstance(split_df, pd.DataFrame) or split_df.empty:
         return pd.DataFrame(columns=SPLIT_REQUIRED)
@@ -2203,10 +2222,14 @@ def _split_for_export(split_df) -> pd.DataFrame:
             + f"\n실제 컬럼: {list(split_df.columns)}"
             + "\n1~25 는 wafer 번호 칸입니다 (comp_id_list 를 펼친 결과)."
         )
+    out = split_df[SPLIT_REQUIRED]
+    if keep_lots is not None:
+        # 화면 쪽 lot 비교와 같은 규칙으로 거른다. 여기만 원본 문자열로
+        # 비교하면, 공백 하나 차이로 멀쩡한 이력이 통째로 빠진다.
+        out = out[out["root_lot_id"].map(norm_lot).isin(keep_lots)]
     # 정렬은 결정적이어야 한다 -- 시간마다 다시 만드는 파일이라, 순서가
     # 흔들리면 내용이 같아도 매번 다른 파일이 올라간다
-    return (split_df[SPLIT_REQUIRED]
-            .sort_values(["root_lot_id", "einecn_no", "step_seq"], kind="stable"))
+    return out.sort_values(["root_lot_id", "einecn_no", "step_seq"], kind="stable")
 
 
 def build_dc_ocap_html() -> Path:
@@ -2244,8 +2267,13 @@ def build_dc_ocap_html() -> Path:
         # 형식으로 들어와도 양쪽이 같은 표기가 된다.
         "spec": {p: _columns(_spec_for_export(product_spec[p])) for p in product_spec},
         # EIN/ECN 적용 이력. 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로
-        # 찾아 팝업에 띄운다.
-        "split": {p: _columns(_split_for_export(product_split[p])) for p in product_split},
+        # 찾아 팝업에 띄운다. 화면에서 열릴 수 없는 lot 은 싣지 않는다.
+        "split": {
+            p: _columns(_split_for_export(
+                product_split[p],
+                reachable_lots(product_dc.get(p), product_trend.get(p))))
+            for p in product_split
+        },
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
@@ -2260,6 +2288,16 @@ def build_dc_ocap_html() -> Path:
     # inflates it with the browser's built-in DecompressionStream, so this
     # still needs no external library.
     encoded = base64.b64encode(gzip.compress(payload, 9)).decode("ascii")
+
+    # 어느 데이터가 파일을 키우는지 매번 찍어 둔다. 이 파일은 한 시간마다
+    # 다시 만들어 올라가는데, 조회 조건 하나 넓히면 조용히 몇 배가 될 수
+    # 있다 -- 열어 보고 나서야 아는 것보다 여기서 보이는 편이 낫다.
+    for name in ("dc", "trend", "spec", "split"):
+        chunk = json.dumps(data[name], ensure_ascii=False,
+                           separators=(",", ":")).encode("utf-8")
+        rows = sum(len(next(iter(c.values()), [])) for c in data[name].values())
+        print(f"  {name:6s} {rows:>9,}행  json {len(chunk)/1024/1024:6.2f} MB"
+              f"  -> {len(chunk)/len(payload)*100:4.1f}% of payload")
 
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 

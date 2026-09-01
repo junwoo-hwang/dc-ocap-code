@@ -223,7 +223,9 @@
                        font-size: 1rem; color: #667085; padding: 0 4px; }
   .modal-head button:hover { color: #d33; }
   .modal-body { padding: 8px 12px 12px; overflow: auto; }
-  .modal-box.modal-wide { max-width: min(1180px, 96vw); }
+  /* 가로는 표가 넓어서 그대로 두고, 세로만 절반으로 줄인다 (72vh -> 36vh).
+     줄이 적으면 어차피 내용만큼만 커지고, 많을 때만 이 높이에서 멈춘다 */
+  .modal-box.modal-wide { max-width: min(1180px, 96vw); max-height: 36vh; }
 
   /* 차트 캡션 줄. 캡션은 왼쪽, EINECN 버튼은 오른쪽 끝에 둔다 */
   .chart-foot { display: flex; align-items: center; justify-content: space-between;
