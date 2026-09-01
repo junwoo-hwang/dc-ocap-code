@@ -183,8 +183,11 @@
   table.wac-stats-table td.bar { min-width: 64px; text-align: right; }
   table.wac-stats-table td.bar::before {
     content: ""; position: absolute; left: 0; top: 3px; bottom: 3px;
-    width: var(--bar, 0%); background: #f4b3ab; border-radius: 2px; z-index: 0; }
+    width: var(--bar, 0%); background: #fbdedb; border-radius: 2px; z-index: 0; }
   table.wac-stats-table td.bar { isolation: isolate; }
+  /* 막대(::before)는 positioned 라서 그냥 두면 글자 위에 그려져 숫자를 가린다.
+     숫자도 positioned 로 올려 막대 위에 오게 한다 */
+  table.wac-stats-table td.bar > span { position: relative; z-index: 1; }
   table.wac-stats-table td.up { color: #d33; font-weight: 700; }
   table.wac-stats-table td.new { color: #b45309; font-weight: 700; }
   /* 통계의 각 줄/막대는 누르면 아래 차트를 그 item 하나로 좁힌다 */
@@ -754,11 +757,10 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
   // 봐야 할 흐름이 한 줄로 눌려 버린다. hold 로 잡힌 wafer 는 예외 -- hold
   // 사유가 바로 그 값인 경우가 많다.
   const bounds = robustBounds(rows.filter(r => !isBad(r)).map(r => r._val));
-  const hidden = rows.filter(r => !isBad(r) && isAbsurd(r._val, bounds, r._lim, false));
   // 0 이라고 무조건 버리지 않는다. 5시그마 규칙이 생기기 전에는 '정확히 0 =
   // 계측 실패' 로 봤는데, 값이 0 근처인 item(누설 같은 것)에서는 멀쩡한 값을
   // 소리 없이 지우게 된다. 진짜 계측 실패인 0 은 어차피 5시그마 밖이라 아래
-  // 규칙에 걸리고, 걸리면 개수도 세어 화면에 적힌다.
+  // 규칙에 걸린다.
   const others = rows.filter(r => !isBad(r) && !isAbsurd(r._val, bounds, r._lim, false));
 
   const traces = [];
@@ -842,7 +844,7 @@ function buildScatterTraces(product, itemCol, badPairs, badLabel, legendField, f
     margin: { t: 30, b: 30, l: 55, r: 20 },
     height: 284,
   };
-  return { traces, layout, measuredCount: rows.length, hiddenCount: hidden.length };
+  return { traces, layout, measuredCount: rows.length };
 }
 
 // ---- rendering ----
@@ -1162,7 +1164,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
     const badPairs = new Set(itemRows.map(r => pairKey(r.root_lot_id, r.wafer_id)));
     const waferList = sortWafers(itemRows.map(r => r.wafer_id)).join(",");
 
-    const { traces, layout, measuredCount, hiddenCount } = buildScatterTraces(
+    const { traces, layout, measuredCount } = buildScatterTraces(
       state.product, itemCol, badPairs, String(lotId), state.legendField, chartFocusPair
     );
     if (measuredCount === 0) {
@@ -1178,10 +1180,7 @@ function renderTrendAndComment(dcAll, dcFiltered) {
       });
       chartClickBound = true;
     }
-    // 숨긴 게 있으면 반드시 적는다. 조용히 빼면 몇 점이 어디로 갔는지
-    // 알 수가 없고, 그게 계측 실패였는지도 모르고 지나간다.
-    chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`
-      + (hiddenCount ? ` · 이상값 ${hiddenCount}점 숨김(hold 건 제외)` : "");
+    chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`;
   }
 
   // comment panel
@@ -1321,9 +1320,8 @@ function wacGroups(product, itemCol) {
   const held = wacDispo(product, itemCol);
   const isHeld = (r) => held.has(r._lot + "||" + r._wf);
   const bounds = robustBounds(rows.filter(r => !isHeld(r)).map(r => r._val));
-  let hidden = 0;
   for (const r of rows) {
-    if (isAbsurd(r._val, bounds, r._lim, isHeld(r))) { hidden += 1; continue; }
+    if (isAbsurd(r._val, bounds, r._lim, isHeld(r))) continue;
     // 각 점은 '그때 유효했던' 관리선으로 판정한다. 규격이 중간에 바뀌면
     // 같은 값이라도 시점에 따라 OUT 여부가 달라진다
     const v = r._val, L = r._lim;
@@ -1348,7 +1346,7 @@ function wacGroups(product, itemCol) {
     if (out[out.length - 1] !== src[src.length - 1]) out.push(src[src.length - 1]);
     g[WAC_TREND] = out;
   }
-  return { g, byLot, hidden };
+  return { g, byLot };
 }
 
 // 선택 표시는 '덧그리기' 로 한다. 바탕(회색/CL/SL)은 한 번 그리고 끝이고,
@@ -1425,7 +1423,7 @@ function wacDrawChart(entry) {
   // 않는 item 수십 개 x 수천 행을 첫 화면 뜨기 전에 훑게 된다
   if (!entry.groups) {
     const built = wacGroups(state.product, itemCol);
-    entry.groups = built.g; entry.byLot = built.byLot; entry.hidden = built.hidden;
+    entry.groups = built.g; entry.byLot = built.byLot;
   }
   const groups = entry.groups;
   const names = ["trend", "CL OUT", "SL OUT"];
@@ -1508,11 +1506,6 @@ function wacDrawChart(entry) {
   addLimitSteps(traces, annotations, specRevisions(state.product, itemCol),
                 xs0.length ? xs0.reduce((a,b)=>a<b?a:b) : undefined,
                 xs0.length ? xs0.reduce((a,b)=>a>b?a:b) : undefined);
-  if (entry.hiddenNote) {
-    entry.hiddenNote.hidden = !entry.hidden;
-    entry.hiddenNote.textContent = entry.hidden
-      ? `이상값 ${entry.hidden}점 숨김 (hold 건 제외)` : "";
-  }
   Plotly.react(div, traces, wacLayout(itemCol, annotations),
                { displayModeBar: false, responsive: true });
   bindReverseDragReset(div);
@@ -1896,7 +1889,10 @@ function statsTable(headers, rows) {
       if (c.cls) td.className = c.cls;
       if (c.title) td.title = c.title;
       if (c.bar !== undefined) {
-        // 숫자 뒤에 깔리는 작은 막대. 칸 너비를 늘리지 않도록 배경으로 둔다
+        // 숫자 뒤에 깔리는 작은 막대. 칸 너비를 늘리지 않도록 배경으로 둔다.
+        // 숫자는 span 으로 감싸 막대 위로 올린다 (안 그러면 막대에 가린다)
+        td.textContent = "";
+        td.appendChild(el("span", { text: c.text }));
         td.className = (td.className ? td.className + " " : "") + "bar";
         td.style.setProperty("--bar", Math.round(c.bar * 100) + "%");
       }
@@ -2182,15 +2178,10 @@ function renderWac() {
       box.appendChild(el("div", { class: "wac-nolimit",
         text: "관리선 없음 (spec 에 " + itemCol + " 이 없습니다)" }));
     }
-    // 숨긴 값이 있으면 그 자리에 적는다. 조용히 빼면 몇 점이 왜 사라졌는지
-    // 알 수가 없다 (개수는 차트를 그린 뒤에 채운다)
-    const hiddenNote = el("div", { class: "wac-nolimit" });
-    hiddenNote.hidden = true;
-    box.appendChild(hiddenNote);
     const div = el("div", { style: "height:260px" });
     box.appendChild(div);
     grid.appendChild(box);
-    wacCharts.push({ div, itemCol, groups: null, hiddenNote,
+    wacCharts.push({ div, itemCol, groups: null,
                      drawn: false, visible: false, dirty: false });
   });
 
