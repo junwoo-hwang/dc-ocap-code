@@ -223,6 +223,39 @@
                        font-size: 1rem; color: #667085; padding: 0 4px; }
   .modal-head button:hover { color: #d33; }
   .modal-body { padding: 8px 12px 12px; overflow: auto; }
+  .modal-box.modal-wide { max-width: min(1180px, 96vw); }
+
+  /* 차트 캡션 줄. 캡션은 왼쪽, EINECN 버튼은 오른쪽 끝에 둔다 */
+  .chart-foot { display: flex; align-items: center; justify-content: space-between;
+                gap: 10px; margin-top: 2px; }
+  .chart-foot .caption { margin: 0; min-width: 0; }
+  #einBtn { font-size: 0.78rem; padding: 3px 10px; border: 1px solid #d0d3d9;
+            border-radius: 6px; background: #fff; cursor: pointer; color: #344054;
+            white-space: nowrap; }
+  #einBtn:hover:not(:disabled) { border-color: #98a2b3; background: #f8fafc; }
+  #einBtn:disabled { color: #98a2b3; cursor: default; }
+
+  /* EINECN 현황 표. 31칸이라 가로로 넘치는 게 정상이고, 넘치는 만큼
+     가로 스크롤로 본다 */
+  table.ein-table { border-collapse: collapse; font-size: 0.78rem;
+                    white-space: nowrap; }
+  table.ein-table th { position: sticky; top: 0; z-index: 2; background: #f8fafc;
+                       color: #475467; font-weight: 700; text-align: left;
+                       padding: 4px 8px; border-bottom: 1px solid #d0d5dd; }
+  table.ein-table td { padding: 3px 8px; border-bottom: 1px solid #eef2f6; }
+  /* 오른쪽으로 밀어도 어느 건인지는 보이게 einecn_no 를 왼쪽에 붙여 둔다 */
+  table.ein-table th:first-child, table.ein-table td:first-child {
+    position: sticky; left: 0; background: #fff; z-index: 1;
+    box-shadow: 6px 0 6px -6px rgba(15, 23, 42, 0.18); }
+  table.ein-table th:first-child { background: #f8fafc; z-index: 3; }
+  /* 하나의 test 를 step 여럿에 묶어 돌린다. 같은 einecn_no 의 step 들이
+     한 덩어리로 보이도록 test 가 바뀌는 줄에만 선을 긋는다 */
+  table.ein-table tr.ein-new td { border-top: 1px solid #cbd5e1; }
+  table.ein-table td.ein-no { font-weight: 600; cursor: help; }
+  table.ein-table td.ein-waf, table.ein-table th.ein-waf {
+    text-align: center; padding: 3px 4px; color: #475467; }
+  table.ein-table td.ein-waf { color: #1d4ed8; font-weight: 700; }
+  table.ein-table td.ein-blank { color: #98a2b3; }
   .modal-body table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
   .modal-body th { text-align: left; color: #667085; font-weight: 600;
                    padding: 4px 8px 4px 0; border-bottom: 1px solid #e2e8f0;
@@ -388,6 +421,18 @@
       <div class="modal-body" id="wacModalBody"></div>
     </div>
   </div>
+
+  <!-- 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로 EIN/ECN 적용 이력을
+       띄운다. 표가 31칸이라 위 팝업보다 훨씬 넓어야 해서 따로 둔다. -->
+  <div id="einModal" class="modal" hidden>
+    <div class="modal-box modal-wide">
+      <div class="modal-head">
+        <span id="einModalTitle"></span>
+        <button type="button" id="einModalClose" title="닫기 (Esc)">✕</button>
+      </div>
+      <div class="modal-body" id="einModalBody"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -428,6 +473,7 @@ async function loadData() {
   for (const p of Object.keys(parsed.dc)) parsed.dc[p] = expandColumnar(parsed.dc[p]);
   for (const p of Object.keys(parsed.trend)) parsed.trend[p] = expandColumnar(parsed.trend[p]);
   for (const p of Object.keys(parsed.spec || {})) parsed.spec[p] = expandColumnar(parsed.spec[p]);
+  for (const p of Object.keys(parsed.split || {})) parsed.split[p] = expandColumnar(parsed.split[p]);
   return parsed;
 }
 
@@ -1002,7 +1048,13 @@ function ensureTrendSkeleton() {
   trendPanel.appendChild(navRow);
   trendPanel.appendChild(el("div", { id: "chartWarning" }));
   trendPanel.appendChild(el("div", { id: "chartDiv" }));
-  trendPanel.appendChild(el("div", { class: "caption", id: "chartCaption" }));
+  // 캡션과 EINECN 버튼을 한 줄에 둔다 (캡션 왼쪽, 버튼 차트 오른쪽 아래)
+  const foot = el("div", { class: "chart-foot" });
+  foot.appendChild(el("div", { class: "caption", id: "chartCaption" }));
+  const einBtn = el("button", { type: "button", id: "einBtn", text: "EINECN" });
+  einBtn.addEventListener("click", () => openEinModal(einBtn.dataset.rootLot || ""));
+  foot.appendChild(einBtn);
+  trendPanel.appendChild(foot);
 
   prevBtn.addEventListener("click", () => {
     const key = `${state.product}|${state.selectedLotId}|${normRwCnt(state.selectedRwCnt)}`;
@@ -1021,6 +1073,72 @@ function ensureTrendSkeleton() {
   resetBtn.addEventListener("click", () => {
     Plotly.relayout("chartDiv", { "xaxis.autorange": true, "yaxis.autorange": true });
   });
+}
+
+// ---- EINECN 현황 팝업 ------------------------------------------------
+// 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로 EIN/ECN 적용 이력을 띄운다.
+const EIN_COLS = ["einecn_no", "step_seq", "step_desc", "ppid", "reason", "ein_ecn_type"];
+const EIN_WAFERS = Array.from({ length: 25 }, (_, i) => String(i + 1));
+
+function splitRowsForLot(product, rootLot) {
+  const key = normLot(rootLot);
+  return ((DATA.split && DATA.split[product]) || [])
+    .filter(r => normLot(r.root_lot_id) === key);
+}
+
+function closeEinModal() {
+  document.getElementById("einModal").hidden = true;
+}
+
+function openEinModal(rootLot) {
+  if (!rootLot) return;
+  const rows = splitRowsForLot(state.product, rootLot);
+  document.getElementById("einModalTitle").textContent =
+    `EINECN 현황 · ${state.product} · ${normLot(rootLot)}`
+    + (rows.length ? ` · ${rows.length}건` : "");
+  const body = document.getElementById("einModalBody");
+  body.innerHTML = "";
+  if (!rows.length) {
+    // 없는 것도 알려줘야 한다. 빈 팝업만 뜨면 눌린 건지 없는 건지 모른다.
+    body.appendChild(el("div", { class: "info-box",
+      text: `${normLot(rootLot)} 에 적용된 EIN/ECN 이력이 없습니다.` }));
+  } else {
+    const table = el("table", { class: "ein-table" });
+    const head = el("tr");
+    EIN_COLS.forEach(c => head.appendChild(el("th", { text: c })));
+    EIN_WAFERS.forEach(w => head.appendChild(el("th", { class: "ein-waf", text: w })));
+    table.appendChild(head);
+
+    // 하나의 test 를 step 여럿에 묶어 돌리므로, 같은 einecn_no 가 step
+    // 수만큼 줄로 나온다. 접지 않고 다 보여주되(step 마다 적용 wafer 가
+    // 다르다), test 가 바뀌는 자리에만 선을 그어 덩어리로 읽히게 한다.
+    let prevNo = null;
+    for (const r of rows) {
+      const no = r.einecn_no == null ? "" : String(r.einecn_no);
+      const tr = el("tr", (prevNo !== null && no !== prevNo) ? { class: "ein-new" } : {});
+      prevNo = no;
+      for (const c of EIN_COLS) {
+        const v = r[c];
+        const td = el("td", { text: v == null ? "" : String(v) });
+        if (c === "einecn_no") {
+          td.className = "ein-no";
+          // title 은 표에 넣기엔 길고 같은 test 의 모든 줄에서 같은 값이라,
+          // einecn_no 에 마우스를 올렸을 때만 뜨게 둔다
+          const t = r.title;
+          if (t != null && String(t) !== "") td.title = String(t);
+        }
+        tr.appendChild(td);
+      }
+      for (const w of EIN_WAFERS) {
+        const on = String(r[w] == null ? "" : r[w]).trim().toUpperCase() === "V";
+        tr.appendChild(el("td", { class: on ? "ein-waf" : "ein-waf ein-blank",
+                                  text: on ? "V" : "" }));
+      }
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+  }
+  document.getElementById("einModal").hidden = false;
 }
 
 // 확대와 반대 방향(오른쪽 -> 왼쪽)으로 끌면 확대를 푼다.
@@ -1150,6 +1268,19 @@ function renderTrendAndComment(dcAll, dcFiltered) {
   itemLabel.appendChild(document.createTextNode(" "));
   itemLabel.appendChild(el("span", { text: items.length ? `(${itemIdx + 1}/${items.length})` : "" }));
   document.getElementById("legendSelect").value = Object.keys(LEGEND_FIELD_OPTIONS).find(k => LEGEND_FIELD_OPTIONS[k] === state.legendField);
+
+  // EINECN 버튼은 지금 보고 있는 lot 을 따라간다: 차트에서 타점을 눌렀으면
+  // 그 wafer 의 lot, 아니면 리스트에서 고른 lot.
+  // lotRows 가 비는 경우가 있다 (필터가 그 lot 을 가린 채로 선택이 남은
+  // 경우). 그때도 lot 자체는 정해져 있으므로 전체 dc 에서 찾는다.
+  const einBtn = document.getElementById("einBtn");
+  const einLotRows = lotRows.length ? lotRows : dcAll.filter(r => r.lot_id === lotId);
+  const einRootLot = chartFocusPair ? chartFocusPair[0]
+                   : (einLotRows.length ? einLotRows[0].root_lot_id : null);
+  einBtn.dataset.rootLot = einRootLot == null ? "" : String(einRootLot);
+  einBtn.disabled = einRootLot == null;
+  einBtn.title = einRootLot == null ? ""
+               : `${normLot(einRootLot)} 에 적용된 EIN/ECN 이력`;
 
   const warningBox = document.getElementById("chartWarning");
   warningBox.innerHTML = "";
@@ -2305,8 +2436,14 @@ document.getElementById("wacModal").addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-item]");
   if (tr) focusItems([tr.dataset.item], `${tr.dataset.item}`);
 });
+document.getElementById("einModalClose").addEventListener("click", closeEinModal);
+document.getElementById("einModal").addEventListener("click", (e) => {
+  if (e.target.id === "einModal") closeEinModal();      // 바깥(어두운 곳)만
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeWacModal();
+  if (e.key !== "Escape") return;
+  closeWacModal();
+  closeEinModal();
 });
 // 전체 legend: 차트마다 따로 고른 것들까지 싹 지우고 하나로 맞춘다
 const wacLegendAll = document.getElementById("wacLegendAll");

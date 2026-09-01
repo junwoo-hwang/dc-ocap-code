@@ -379,6 +379,7 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
 
 
 def generate_split_for_product(product: str, trend_df: pd.DataFrame,
+                               dc_df: pd.DataFrame | None = None,
                                n_rows: int = 40, seed: int | None = None) -> pd.DataFrame:
     """Generate a mock EIN/ECN split dataframe for a single product.
 
@@ -402,11 +403,20 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
 
     root_lot_id and the wafer numbers are sampled from `trend_df`, so a
     split can actually be looked up against the measurements.
+
+    Pass `dc_df` to weight the lots towards ones that were actually held.
+    Without it the lots are drawn flat and most held lots end up with no
+    EIN/ECN history at all, so the EINECN button on the dashboard has
+    nothing to show on almost every hold -- which is not what the real
+    data looks like, and leaves the popup untested.
     """
     rng = np.random.default_rng(seed)
     cfg = PRODUCT_CONFIG[product]
     # 정렬해 둔다 -- unique() 는 등장 순서라 위쪽 mock 이 바뀌면 같이 흔들린다
     lots = sorted(trend_df["root_lot_id"].unique())
+    held_lots = []
+    if isinstance(dc_df, pd.DataFrame) and "root_lot_id" in dc_df.columns:
+        held_lots = sorted(set(dc_df["root_lot_id"]) & set(lots))
     wafers_by_lot = {lot: sorted(int(w) for w in g["wafer_id"].unique())
                      for lot, g in trend_df.groupby("root_lot_id")}
     # 제품 하나가 쓰는 ppid 는 몇 개뿐이라 풀에서 골라 쓴다
@@ -425,40 +435,45 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
         ppid = ppids[rng.integers(0, len(ppids))]
         title = str(rng.choice(SPLIT_TITLES))
 
-        # 한 건(einecn_no)이 여러 step, 여러 lot 에 걸리는 경우가 흔하다.
-        # 같은 (lot, step) 이 두 번 나오면 합쳐졌어야 할 행이 두 줄로
-        # 남으므로, 짝을 겹치지 않게 뽑는다.
-        seen = set()
-        for _ in range(int(rng.integers(1, 4))):
-            lot = lots[rng.integers(0, len(lots))]
-            step_seq = ("".join(rng.choice(list(string.ascii_uppercase), size=2))
-                        + f"{rng.integers(0, 1000000):06d}")
-            if (lot, step_seq) in seen:
-                continue
-            seen.add((lot, step_seq))
+        # 하나의 test(einecn_no)를 step 여럿에 묶어서 돌린다. 그러니 lot 을
+        # 먼저 하나 정하고, 그 lot 안에서 step 을 여러 개 뽑는다 -- step 마다
+        # 한 줄이고, 적용된 wafer 도 step 마다 다르다.
+        # hold 가 걸린 lot 쪽으로 기울여 뽑는다 (위 docstring 참고)
+        lot_pool = (held_lots if held_lots and rng.random() < 0.7 else lots)
+        # 가끔 한 test 가 lot 두 개에 걸친다
+        n_lots = 2 if (len(lot_pool) > 1 and rng.random() < 0.2) else 1
+        for lot in rng.choice(lot_pool, size=n_lots, replace=False):
+            lot = str(lot)
+            # 같은 (lot, step) 이 두 번 나오면 합쳐졌어야 할 행이 두 줄로
+            # 남는다. step 을 겹치지 않게 뽑는다.
+            steps = set()
+            while len(steps) < int(rng.integers(1, 4)):
+                steps.add("".join(rng.choice(list(string.ascii_uppercase), size=2))
+                          + f"{rng.integers(0, 1000000):06d}")
 
-            pool = wafers_by_lot[lot]
-            n_hit = min(len(pool), int(rng.integers(1, 14)))
-            hit = set(int(w) for w in rng.choice(pool, size=n_hit, replace=False))
+            for step_seq in sorted(steps):
+                pool = wafers_by_lot[lot]
+                n_hit = min(len(pool), int(rng.integers(1, 14)))
+                hit = set(int(w) for w in rng.choice(pool, size=n_hit, replace=False))
 
-            draw = rng.random()
-            reason = None if draw < 0.2 else ("" if draw < 0.35
-                                              else str(rng.choice(SPLIT_REASONS)))
+                draw = rng.random()
+                reason = None if draw < 0.2 else ("" if draw < 0.35
+                                                  else str(rng.choice(SPLIT_REASONS)))
 
-            row = {
-                "einecn_no": einecn_no,
-                "root_lot_id": lot,
-                "ppid": ppid,
-                "ein_ecn_type": ein_ecn_type,
-                "step_seq": step_seq,
-                "step_desc": str(rng.choice(SPLIT_STEP_DESCS)),
-                "title": title,
-                "reason": reason,
-                "process_id": cfg["process_id"],
-            }
-            for n in range(1, SPLIT_N_WAFER + 1):
-                row[str(n)] = "V" if n in hit else ""
-            rows.append(row)
+                row = {
+                    "einecn_no": einecn_no,
+                    "root_lot_id": lot,
+                    "ppid": ppid,
+                    "ein_ecn_type": ein_ecn_type,
+                    "step_seq": step_seq,
+                    "step_desc": str(rng.choice(SPLIT_STEP_DESCS)),
+                    "title": title,
+                    "reason": reason,
+                    "process_id": cfg["process_id"],
+                }
+                for n in range(1, SPLIT_N_WAFER + 1):
+                    row[str(n)] = "V" if n in hit else ""
+                rows.append(row)
 
     return pd.DataFrame(rows)[
         ["einecn_no", "root_lot_id", "ppid", "ein_ecn_type"]
@@ -500,9 +515,9 @@ def pull_data():
     sol_spec = generate_spec_for_product("SOL", sol_trend)
     tts_spec = generate_spec_for_product("TTS", tts_trend)
 
-    uly_split = generate_split_for_product("ULY", uly_trend, seed=301)
-    sol_split = generate_split_for_product("SOL", sol_trend, seed=302)
-    tts_split = generate_split_for_product("TTS", tts_trend, seed=303)
+    uly_split = generate_split_for_product("ULY", uly_trend, uly_dc, seed=301)
+    sol_split = generate_split_for_product("SOL", sol_trend, sol_dc, seed=302)
+    tts_split = generate_split_for_product("TTS", tts_trend, tts_dc, seed=303)
 
     return (uly_dc, sol_dc, tts_dc,
             uly_trend, sol_trend, tts_trend,
@@ -569,6 +584,14 @@ SPEC_REQUIRED = ["item_id", "from_time", *LIMIT_COLS]
 # trend's own columns, everything else is either an item or one of its limits
 META_TREND_COLS = ["root_lot_id", "wafer_id", "tkout_time",
                    "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
+
+# EIN/ECN 적용 이력(split) 에서 EINECN 팝업이 읽는 것들.
+# "1".."25" 는 wafer 번호 칸이고, 그 wafer 가 적용 대상이면 "V" 가 들어 있다.
+SPLIT_WAFER_COLUMNS = [str(n) for n in range(1, 26)]
+# 팝업 표의 칸 순서 그대로다. root_lot_id 는 어느 lot 의 이력인지 찾는 데
+# 쓰고, title 은 einecn_no 에 마우스를 올렸을 때 뜬다 -- 둘 다 표에는 없다.
+SPLIT_REQUIRED = ["root_lot_id", "title", "einecn_no", "step_seq", "step_desc",
+                  "ppid", "reason", "ein_ecn_type", *SPLIT_WAFER_COLUMNS]
 
 
 def item_columns(trend_df) -> list:
@@ -2162,11 +2185,35 @@ def _spec_for_export(spec_df) -> pd.DataFrame:
             .sort_values(["item_id", "from_time", *LIMIT_COLS], na_position="first"))
 
 
+def _split_for_export(split_df) -> pd.DataFrame:
+    """split 을 EINECN 팝업이 쓸 모양으로: 필요한 칸만, 정해진 순서로.
+
+    einecn_no 하나가 step 여러 개에 걸린다 -- 하나의 test 를 step 여럿에
+    묶어서 돌리기 때문이다. 그러니 einecn_no 로 묶어 한 줄로 접으면 안 되고,
+    step 마다 한 줄로 둔다 (step 이 다르면 적용된 wafer 도 다르다). 대신
+    einecn_no 로 먼저 정렬해서 같은 test 의 step 들이 붙어 나오게 한다.
+    """
+    if not isinstance(split_df, pd.DataFrame) or split_df.empty:
+        return pd.DataFrame(columns=SPLIT_REQUIRED)
+    missing = [c for c in SPLIT_REQUIRED if c not in split_df.columns]
+    if missing:
+        raise SystemExit(
+            "split 에 EINECN 팝업이 요구하는 컬럼이 없습니다: "
+            + ", ".join(map(str, missing))
+            + f"\n실제 컬럼: {list(split_df.columns)}"
+            + "\n1~25 는 wafer 번호 칸입니다 (comp_id_list 를 펼친 결과)."
+        )
+    # 정렬은 결정적이어야 한다 -- 시간마다 다시 만드는 파일이라, 순서가
+    # 흔들리면 내용이 같아도 매번 다른 파일이 올라간다
+    return (split_df[SPLIT_REQUIRED]
+            .sort_values(["root_lot_id", "einecn_no", "step_seq"], kind="stable"))
+
+
 def build_dc_ocap_html() -> Path:
     """Generate dc_ocap.html from the current pull_data() and return its path."""
     # 제품 순서까지 한 곳에서 정한다. 여기서 순서가 어긋나면 리포트 머리글의
     # 건수만 제품 전환 버튼과 다른 순서로 나온다 (예전에 그랬다).
-    product_dc, product_trend, product_spec, _product_split = frames_by_product(pull_data())
+    product_dc, product_trend, product_spec, product_split = frames_by_product(pull_data())
 
     # same validation the Streamlit page runs before trusting the data --
     # a bad schema should fail the scheduled build loudly rather than ship
@@ -2196,6 +2243,9 @@ def build_dc_ocap_html() -> Path:
         # 당일 측정에 이전 규격이 적용된다. 여기서 한 번 변환해 두면 어떤
         # 형식으로 들어와도 양쪽이 같은 표기가 된다.
         "spec": {p: _columns(_spec_for_export(product_spec[p])) for p in product_spec},
+        # EIN/ECN 적용 이력. 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로
+        # 찾아 팝업에 띄운다.
+        "split": {p: _columns(_split_for_export(product_split[p])) for p in product_split},
     }
 
     generated_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
