@@ -75,6 +75,38 @@ EQP_IDS = [f"PRB{n:02d}" for n in range(1, 7)]
 LOT_TYPES = ["MP", "ENG", "MONITOR", "RND"]
 RW_CNT_VALUES = [0, 1, 2, 3, 4, 5]
 
+# split(EIN/ECN 적용 이력) 용. dc(hold) 와는 다른 계통이라 lot 만 겹칠 뿐
+# 같은 건을 가리키지 않는다. 원본에서는 comp_id_list 한 칸에
+# "ABABC.04,ABABC.13,..." 처럼 들어오는데, 여기 mock 은 이미 wafer 번호
+# 칸(1~25)으로 펼치고 같은 건끼리 합친 뒤의 모양으로 만든다.
+EIN_ECN_TYPES = ["EIN", "ECN"]
+SPLIT_STEP_DESCS = [
+    "PHOTO ALIGN KEY 재설정",
+    "ETCH CHAMBER SEASONING 조건 변경",
+    "CMP PAD 교체 후 조건 재설정",
+    "IMPLANT DOSE 보정",
+    "CLEAN RECIPE STEP 추가",
+    "METAL DEPO TARGET 교체",
+    "ANNEAL TEMP PROFILE 변경",
+]
+SPLIT_TITLES = [
+    "설비 PM 후 조건 재적용",
+    "신규 recipe 적용 평가",
+    "수율 개선 조건 split 평가",
+    "계측 산포 개선 조건 확인",
+    "대체 설비 적용 평가",
+    "원자재 lot 변경 검증",
+]
+SPLIT_REASONS = [
+    "PM 이후 첫 적용분 확인 필요",
+    "직전 lot 산포 확대 대응",
+    "고객 요청 조건 변경",
+    "설비 alarm 이력 연계 확인",
+    "양산 적용 전 소량 평가",
+]
+SPLIT_N_WAFER = 25
+SPLIT_WAFER_COLS = [str(n) for n in range(1, SPLIT_N_WAFER + 1)]
+
 # product is identified by process_id: KNNU=uly, KNJO=sol, KNIK=tts
 PRODUCT_CONFIG = {
     "ULY": {"n_items": 18, "center": 50, "spread": 6, "seed": 101, "process_id": "KNNU"},
@@ -341,6 +373,110 @@ def generate_dc_for_product(product: str, trend_df: pd.DataFrame, n_rows: int = 
         df.loc[mask, ["owner", "code", "comment"]] = None
         df.loc[mask, "status"] = "Hold"
     return df
+
+
+def generate_split_for_product(product: str, trend_df: pd.DataFrame,
+                               n_rows: int = 40, seed: int | None = None) -> pd.DataFrame:
+    """Generate a mock EIN/ECN split dataframe for a single product.
+
+    Columns, in this order:
+      einecn_no, root_lot_id, ppid, ein_ecn_type, "1".."25",
+      step_seq, step_desc, title, reason, process_id
+
+    "1".."25" are wafer numbers: "V" if that wafer is in the split, "" if
+    not. This is the shape *after* comp_id_list has been spread out and
+    rows that only differed by comp_id_list have been merged, which is how
+    the datalake hands it over -- so one (einecn_no, root_lot_id, ppid,
+    ein_ecn_type, step_seq) never appears twice.
+
+    Two things are deliberately left blank, because they are blank in the
+    real data and anything reading this has to cope:
+      - reason: some rows have None (a datalake NULL) and some have "".
+        Both occur; code that only checks one of them will miss the other.
+      - the wafer columns: most are "" on any given row. Every row has at
+        least one "V" though -- a split that touched no wafer is dropped
+        upstream, so it never reaches here.
+
+    root_lot_id and the wafer numbers are sampled from `trend_df`, so a
+    split can actually be looked up against the measurements.
+    """
+    rng = np.random.default_rng(seed)
+    cfg = PRODUCT_CONFIG[product]
+    # 정렬해 둔다 -- unique() 는 등장 순서라 위쪽 mock 이 바뀌면 같이 흔들린다
+    lots = sorted(trend_df["root_lot_id"].unique())
+    wafers_by_lot = {lot: sorted(int(w) for w in g["wafer_id"].unique())
+                     for lot, g in trend_df.groupby("root_lot_id")}
+    # 제품 하나가 쓰는 ppid 는 몇 개뿐이라 풀에서 골라 쓴다
+    ppids = ["".join(rng.choice(LOT_ID_CHARS, size=int(rng.integers(12, 23))))
+             for _ in range(4)]
+
+    rows = []
+    while len(rows) < n_rows:
+        einecn_no = (
+            "".join(rng.choice(list(string.ascii_uppercase), size=3))
+            + f"{rng.integers(0, 1000000):06d}"
+            + "".join(rng.choice(LOT_ID_CHARS, size=3))
+            + f"-{rng.integers(0, 3)}"
+        )
+        ein_ecn_type = str(rng.choice(EIN_ECN_TYPES, p=[0.75, 0.25]))
+        ppid = ppids[rng.integers(0, len(ppids))]
+        title = str(rng.choice(SPLIT_TITLES))
+
+        # 한 건(einecn_no)이 여러 step, 여러 lot 에 걸리는 경우가 흔하다.
+        # 같은 (lot, step) 이 두 번 나오면 합쳐졌어야 할 행이 두 줄로
+        # 남으므로, 짝을 겹치지 않게 뽑는다.
+        seen = set()
+        for _ in range(int(rng.integers(1, 4))):
+            lot = lots[rng.integers(0, len(lots))]
+            step_seq = ("".join(rng.choice(list(string.ascii_uppercase), size=2))
+                        + f"{rng.integers(0, 1000000):06d}")
+            if (lot, step_seq) in seen:
+                continue
+            seen.add((lot, step_seq))
+
+            pool = wafers_by_lot[lot]
+            n_hit = min(len(pool), int(rng.integers(1, 14)))
+            hit = set(int(w) for w in rng.choice(pool, size=n_hit, replace=False))
+
+            draw = rng.random()
+            reason = None if draw < 0.2 else ("" if draw < 0.35
+                                              else str(rng.choice(SPLIT_REASONS)))
+
+            row = {
+                "einecn_no": einecn_no,
+                "root_lot_id": lot,
+                "ppid": ppid,
+                "ein_ecn_type": ein_ecn_type,
+                "step_seq": step_seq,
+                "step_desc": str(rng.choice(SPLIT_STEP_DESCS)),
+                "title": title,
+                "reason": reason,
+                "process_id": cfg["process_id"],
+            }
+            for n in range(1, SPLIT_N_WAFER + 1):
+                row[str(n)] = "V" if n in hit else ""
+            rows.append(row)
+
+    return pd.DataFrame(rows)[
+        ["einecn_no", "root_lot_id", "ppid", "ein_ecn_type"]
+        + SPLIT_WAFER_COLS
+        + ["step_seq", "step_desc", "title", "reason", "process_id"]
+    ]
+
+
+def pull_split_data():
+    """Return the EIN/ECN split frames x3 (ULY, SOL, TTS in that order).
+
+    Kept apart from pull_data() on purpose: pull_data()'s 9-frame return is
+    what the dashboard and diagnose.py are written against, and nothing on
+    the screen reads split yet. Swap this one for the real datalake pull
+    (제품_split x3) at the same time as pull_data(), and fold it into that
+    return once something below the marker actually needs it.
+    """
+    uly_split = generate_split_for_product("ULY", generate_probe_df("ULY"), seed=301)
+    sol_split = generate_split_for_product("SOL", generate_probe_df("SOL"), seed=302)
+    tts_split = generate_split_for_product("TTS", generate_probe_df("TTS"), seed=303)
+    return uly_split, sol_split, tts_split
 
 
 def pull_data():
