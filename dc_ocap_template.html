@@ -1095,8 +1095,18 @@ function closeEinModal() {
 function openEinModal(rootLot) {
   if (!rootLot) return;
   const rows = splitRowsForLot(state.product, rootLot);
+  // 그 lot 에서 OCAP 이 걸린 wafer. 표의 1~25 칸(적용된 wafer)과 곧바로
+  // 견주라고 제목에 적는다. dc 전체를 보는 이유는 팝업 자체가 root_lot
+  // 단위이기 때문이다 -- 지금 고른 hold 건 하나가 아니라 그 lot 이 기준이다.
+  const lotKey = normLot(rootLot);
+  const heldWafers = sortWafers(
+    (DATA.dc[state.product] || [])
+      .filter(r => normLot(r.root_lot_id) === lotKey)
+      .map(r => r.wafer_id)
+  );
   document.getElementById("einModalTitle").textContent =
     `EINECN 현황 · ${state.product} · ${normLot(rootLot)}`
+    + ` · OCAP WF ${heldWafers.length ? heldWafers.join(",") : "없음"}`
     + (rows.length ? ` · ${rows.length}건` : "");
   const body = document.getElementById("einModalBody");
   body.innerHTML = "";
