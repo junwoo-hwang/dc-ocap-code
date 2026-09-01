@@ -1302,7 +1302,12 @@ const WAC_GRAY = "lightgray", WAC_SAME = "dimgray";
 // 수천 점을 찍으면 대부분 겹쳐서 그림은 그대로인데, 다시 그리는 비용만
 // 점 수에 비례해 늘어난다. CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게
 // 봐야 할 신호다. 0 으로 두면 솎지 않고 전부 그린다.
-const WAC_MAX_GRAY = 2500;
+// 2500 -> 1200: plotly 는 타점 하나마다 <path> 를 하나씩 만들기 때문에,
+// 실제로 무거운 것은 자바스크립트가 아니라 그 뒤에 오는 브라우저의 배치/
+// 그리기다 (실측: 그리는 함수 147ms 인데 그 프레임은 747ms). 점을 줄이면
+// 거기가 줄어든다 -- 2500 점일 때 긴 작업 합계 7.9초, 1200 점이면 5.0초.
+// 회색은 관리선 안에 든 점뿐이라 솎아도 놓치는 신호가 없다.
+const WAC_MAX_GRAY = 1200;
 
 // 차트마다 트레이스 3개를 '고정' 으로 둔다: 회색 / CL OUT / SL OUT.
 // 선택이 바뀌어도 어느 타점이 어느 트레이스에 속하는지는 그대로이고
@@ -1551,6 +1556,10 @@ function wacPaintSelection(e) {
 // 보이는 차트는 클릭 즉시 칠해지므로 이 큐는 '지나온 것 따라잡기' 용이다.
 const wacQueue = [];
 let wacDraining = false;
+// 화면 위아래로 이만큼 더 그려 둔다. 스크롤 방향으로 미리 그려 놔야
+// 굴리는 동안 빈 칸이 안 보인다 (차트 하나에 150ms 라, 화면에 들어온 뒤에
+// 시작하면 이미 늦다).
+const WAC_NEAR = 900;
 
 // 화면(+여유 300px) 안에 있는가. 관찰자와 같은 기준이다.
 // 문서에서 떨어져 나간 차트를 먼저 걸러야 한다 -- 떨어진 노드는 크기가 전부
@@ -1559,7 +1568,14 @@ let wacDraining = false;
 function wacOnScreen(entry) {
   if (!entry.div.isConnected) return false;
   const r = entry.div.getBoundingClientRect();
-  return r.bottom > -300 && r.top < window.innerHeight + 300;
+  return r.bottom > -WAC_NEAR && r.top < window.innerHeight + WAC_NEAR;
+}
+
+// 화면 한가운데에서 얼마나 떨어져 있나. 큐를 이 순서로 처리한다.
+function wacDistance(entry) {
+  if (!entry.div.isConnected) return Infinity;
+  const r = entry.div.getBoundingClientRect();
+  return Math.abs((r.top + r.bottom) / 2 - window.innerHeight / 2);
 }
 
 function wacEnqueue(entry, kind) {
@@ -1575,12 +1591,18 @@ function wacDrainSoon() {
   wacDraining = true;
   const run = () => {
     wacDraining = false;
-    // 스크롤 중에는 한 번에 하나만 한다 -- 차트 하나가 100ms 남짓이라
+    // 스크롤 중에는 한 번에 하나만 한다 -- 차트 하나가 150ms 남짓이라
     // 몰아서 하면 그만큼 스크롤이 멎는다. 손을 떼면 남은 것을 몰아서
     // 끝낸다: 한 개씩 한가할 때만 하면 채워지는 데 몇 초가 걸린다
     // (실측 6개에 4.3초, 정작 그리는 시간은 0.7초뿐이었다).
     const budget = wacScrolling ? 0 : 60;
     const t0 = performance.now();
+    // 눈에 가까운 것부터 그린다. 넣은 순서대로 하면 스크롤을 멈춘 자리에서
+    // 정작 보고 있는 차트가 지나온 차트들 뒤에 줄을 서게 된다.
+    if (wacQueue.length > 1) {
+      for (const j of wacQueue) j._d = wacDistance(j.entry);
+      wacQueue.sort((a, b) => a._d - b._d);
+    }
     do {
       const job = wacQueue.shift();
       if (!job) break;
@@ -1596,8 +1618,13 @@ function wacDrainSoon() {
     } while (wacQueue.length && performance.now() - t0 < budget);
     wacDrainSoon();
   };
-  // timeout 을 둬서 계속 바쁜 화면에서도 언젠가는 반드시 처리되게 한다
-  if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 300 });
+  // 스크롤 중에는 한가한 틈을 기다리지 않는다. 굴리는 동안에는 idle 이 거의
+  // 없어서 timeout(300ms) 을 매번 다 채우고, 그래서 초당 서너 개밖에 못
+  // 그린다 -- 실측으로 그리는 데 147ms, 큐에서 기다리는 데 2552ms 였다.
+  // 다음 프레임에 하나씩 하면 대기가 한 프레임으로 줄고, 사이사이 프레임을
+  // 내주므로 스크롤도 계속 먹는다.
+  if (wacScrolling) requestAnimationFrame(run);
+  else if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 120 });
   else setTimeout(run, 0);
 }
 
@@ -2226,7 +2253,7 @@ const wacObserver = new IntersectionObserver((entries) => {
     if (!e.drawn) wacEnqueue(e, "draw");
     else if (e.dirty) wacEnqueue(e, "paint");
   }
-}, { rootMargin: "300px" });
+}, { rootMargin: WAC_NEAR + "px" });
 
 function renderAll() {
   if (state.page === "wac") { renderWac(); return; }
