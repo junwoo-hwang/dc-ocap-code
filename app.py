@@ -460,10 +460,13 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
                 # 같은 step 이 ppid 여러 개로 나뉘어 오기도 한다. 팝업은
                 # step_seq / step_desc 칸을 합쳐 그리므로, 그 경우가 mock 에
                 # 없으면 병합이 한 번도 안 그려져 확인이 안 된다.
-                n_ppid = 1 if rng.random() < 0.7 else int(rng.integers(2, 4))
-                step_ppids = rng.choice(ppids, size=min(n_ppid, len(ppids)), replace=False)
-                # 조건을 갈라 보는 게 split 이니, 한 wafer 는 한 조건에만
-                # 들어간다 -- ppid 별 wafer 를 겹치지 않게 나눈다
+                # 한 step 이 여러 줄로 나뉘어 오고, 줄마다 wafer 가 다르다.
+                # ppid 는 겹칠 수 있게 뽑는다(replace=True): 나누는 기준이
+                # 설비인 경우가 있는데 설비 칸은 안 받아오므로, 그런 줄들은
+                # comp_id_list 말고는 완전히 같은 모습으로 들어온다.
+                n_group = 1 if rng.random() < 0.6 else int(rng.integers(2, 4))
+                step_ppids = rng.choice(ppids, size=n_group, replace=True)
+                # 한 wafer 는 한 갈래에만 들어간다 -- 갈래별 wafer 는 겹치지 않는다
                 pool = wafers_by_lot[lot]
                 taken = rng.permutation(pool)[:min(len(pool), int(rng.integers(1, 14)))]
                 shares = np.array_split(taken, len(step_ppids))
