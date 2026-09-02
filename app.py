@@ -432,8 +432,12 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
             + f"-{rng.integers(0, 3)}"
         )
         ein_ecn_type = str(rng.choice(EIN_ECN_TYPES, p=[0.75, 0.25]))
-        ppid = ppids[rng.integers(0, len(ppids))]
         title = str(rng.choice(SPLIT_TITLES))
+        # reason 은 title 과 같이 '그 test 를 왜 했나' 라서 test 단위로 붙는다
+        # (팝업에서도 einecn_no 에 마우스를 올리면 둘이 같이 뜬다)
+        draw = rng.random()
+        reason = None if draw < 0.2 else ("" if draw < 0.35
+                                          else str(rng.choice(SPLIT_REASONS)))
 
         # 하나의 test(einecn_no)를 step 여럿에 묶어서 돌린다. 그러니 lot 을
         # 먼저 하나 정하고, 그 lot 안에서 step 을 여러 개 뽑는다 -- step 마다
@@ -452,28 +456,36 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
                           + f"{rng.integers(0, 1000000):06d}")
 
             for step_seq in sorted(steps):
+                step_desc = str(rng.choice(SPLIT_STEP_DESCS))
+                # 같은 step 이 ppid 여러 개로 나뉘어 오기도 한다. 팝업은
+                # step_seq / step_desc 칸을 합쳐 그리므로, 그 경우가 mock 에
+                # 없으면 병합이 한 번도 안 그려져 확인이 안 된다.
+                n_ppid = 1 if rng.random() < 0.7 else int(rng.integers(2, 4))
+                step_ppids = rng.choice(ppids, size=min(n_ppid, len(ppids)), replace=False)
+                # 조건을 갈라 보는 게 split 이니, 한 wafer 는 한 조건에만
+                # 들어간다 -- ppid 별 wafer 를 겹치지 않게 나눈다
                 pool = wafers_by_lot[lot]
-                n_hit = min(len(pool), int(rng.integers(1, 14)))
-                hit = set(int(w) for w in rng.choice(pool, size=n_hit, replace=False))
+                taken = rng.permutation(pool)[:min(len(pool), int(rng.integers(1, 14)))]
+                shares = np.array_split(taken, len(step_ppids))
 
-                draw = rng.random()
-                reason = None if draw < 0.2 else ("" if draw < 0.35
-                                                  else str(rng.choice(SPLIT_REASONS)))
-
-                row = {
-                    "einecn_no": einecn_no,
-                    "root_lot_id": lot,
-                    "ppid": ppid,
-                    "ein_ecn_type": ein_ecn_type,
-                    "step_seq": step_seq,
-                    "step_desc": str(rng.choice(SPLIT_STEP_DESCS)),
-                    "title": title,
-                    "reason": reason,
-                    "process_id": cfg["process_id"],
-                }
-                for n in range(1, SPLIT_N_WAFER + 1):
-                    row[str(n)] = "V" if n in hit else ""
-                rows.append(row)
+                for step_ppid, share in zip(step_ppids, shares):
+                    hit = set(int(w) for w in share)
+                    if not hit:
+                        continue      # wafer 가 없는 줄은 앞 단계에서 걸러진다
+                    row = {
+                        "einecn_no": einecn_no,
+                        "root_lot_id": lot,
+                        "ppid": str(step_ppid),
+                        "ein_ecn_type": ein_ecn_type,
+                        "step_seq": step_seq,
+                        "step_desc": step_desc,
+                        "title": title,
+                        "reason": reason,
+                        "process_id": cfg["process_id"],
+                    }
+                    for n in range(1, SPLIT_N_WAFER + 1):
+                        row[str(n)] = "V" if n in hit else ""
+                    rows.append(row)
 
     return pd.DataFrame(rows)[
         ["einecn_no", "root_lot_id", "ppid", "ein_ecn_type"]
@@ -2227,9 +2239,17 @@ def _split_for_export(split_df, keep_lots=None) -> pd.DataFrame:
         # 화면 쪽 lot 비교와 같은 규칙으로 거른다. 여기만 원본 문자열로
         # 비교하면, 공백 하나 차이로 멀쩡한 이력이 통째로 빠진다.
         out = out[out["root_lot_id"].map(norm_lot).isin(keep_lots)]
-    # 정렬은 결정적이어야 한다 -- 시간마다 다시 만드는 파일이라, 순서가
-    # 흔들리면 내용이 같아도 매번 다른 파일이 올라간다
-    return out.sort_values(["root_lot_id", "einecn_no", "step_seq"], kind="stable")
+    # 팝업은 test(einecn_no) 단위로 칸을 병합해 읽으므로 같은 test 의 줄이
+    # 흩어지면 안 된다. 그러면서 step 순서로도 읽혀야 하니, test 안에서는
+    # step_seq 순으로 늘어놓고, test 끼리는 그 test 의 첫 step_seq 순으로
+    # 놓는다 -- 이름순으로 놓으면 step_seq 칸이 위아래로 튄다.
+    # 정렬은 결정적이어야 한다: 시간마다 다시 만드는 파일이라, 순서가
+    # 흔들리면 내용이 같아도 매번 다른 파일이 올라간다.
+    out = out.sort_values(["root_lot_id", "einecn_no", "step_seq"], kind="stable")
+    first_step = out.groupby(["root_lot_id", "einecn_no"], sort=False)["step_seq"].transform("min")
+    return (out.assign(_first_step=first_step)
+            .sort_values(["root_lot_id", "_first_step", "einecn_no", "step_seq"], kind="stable")
+            .drop(columns="_first_step"))
 
 
 def build_dc_ocap_html() -> Path:

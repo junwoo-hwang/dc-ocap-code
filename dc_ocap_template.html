@@ -223,9 +223,10 @@
                        font-size: 1rem; color: #667085; padding: 0 4px; }
   .modal-head button:hover { color: #d33; }
   .modal-body { padding: 8px 12px 12px; overflow: auto; }
-  /* 가로는 표가 넓어서 그대로 두고, 세로만 절반으로 줄인다 (72vh -> 36vh).
-     줄이 적으면 어차피 내용만큼만 커지고, 많을 때만 이 높이에서 멈춘다 */
-  .modal-box.modal-wide { max-width: min(1180px, 96vw); max-height: 36vh; }
+  /* 세로는 절반으로 줄인다 (72vh -> 36vh). 줄이 적으면 어차피 내용만큼만
+     커지고, 많을 때만 이 높이에서 멈춘다. 가로는 1.25배 (1180 -> 1475px) --
+     화면이 좁으면 96vw 가 먼저 걸리므로 넘치지는 않는다 */
+  .modal-box.modal-wide { max-width: min(1475px, 96vw); max-height: 36vh; }
 
   /* 차트 캡션 줄. 캡션은 왼쪽, EINECN 버튼은 오른쪽 끝에 둔다 */
   .chart-foot { display: flex; align-items: center; justify-content: space-between;
@@ -244,7 +245,9 @@
   table.ein-table th { position: sticky; top: 0; z-index: 2; background: #f8fafc;
                        color: #475467; font-weight: 700; text-align: left;
                        padding: 4px 8px; border-bottom: 1px solid #d0d5dd; }
-  table.ein-table td { padding: 3px 8px; border-bottom: 1px solid #eef2f6; }
+  /* 합쳐진 칸은 값이 그 덩어리의 첫 줄과 나란히 보이도록 위로 붙인다 */
+  table.ein-table td { padding: 3px 8px; border-bottom: 1px solid #eef2f6;
+                       vertical-align: top; }
   /* 오른쪽으로 밀어도 어느 건인지는 보이게 einecn_no 를 왼쪽에 붙여 둔다 */
   table.ein-table th:first-child, table.ein-table td:first-child {
     position: sticky; left: 0; background: #fff; z-index: 1;
@@ -1079,8 +1082,34 @@ function ensureTrendSkeleton() {
 
 // ---- EINECN 현황 팝업 ------------------------------------------------
 // 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로 EIN/ECN 적용 이력을 띄운다.
-const EIN_COLS = ["einecn_no", "step_seq", "step_desc", "ppid", "reason", "ein_ecn_type"];
+// reason 은 칸으로 두지 않는다 -- title 과 같이 '그 test 를 왜 했나' 라서,
+// einecn_no 에 마우스를 올렸을 때 title 밑에 같이 뜬다.
+const EIN_COLS = ["einecn_no", "step_seq", "step_desc", "ppid", "ein_ecn_type"];
+// 위 줄과 값이 같으면 칸을 합친다. 무엇이 같아야 합치는지는 왼쪽 칸까지
+// 따진다: 같은 step_seq 라도 test 가 다르면 einecn_no 칸이 이미 갈라져
+// 있으므로, 그 아래 칸이 test 를 가로질러 합쳐지면 표가 어긋난다.
+const EIN_MERGE_KEYS = {
+  einecn_no: ["einecn_no"],
+  step_seq: ["einecn_no", "step_seq"],
+  step_desc: ["einecn_no", "step_seq", "step_desc"],
+};
 const EIN_WAFERS = Array.from({ length: 25 }, (_, i) => String(i + 1));
+
+function einText(v) {
+  return v == null ? "" : String(v);
+}
+
+// 각 병합 칸이 몇 줄을 덮는지 미리 센다 (덮이는 줄에는 칸을 안 그린다)
+function einRowSpans(rows, keys) {
+  const spans = new Array(rows.length).fill(0);
+  let start = 0;
+  for (let i = 1; i <= rows.length; i++) {
+    const changed = i === rows.length
+      || keys.some(k => einText(rows[i][k]) !== einText(rows[i - 1][k]));
+    if (changed) { spans[start] = i - start; start = i; }
+  }
+  return spans;
+}
 
 function splitRowsForLot(product, rootLot) {
   const key = normLot(rootLot);
@@ -1122,32 +1151,44 @@ function openEinModal(rootLot) {
     table.appendChild(head);
 
     // 하나의 test 를 step 여럿에 묶어 돌리므로, 같은 einecn_no 가 step
-    // 수만큼 줄로 나온다. 접지 않고 다 보여주되(step 마다 적용 wafer 가
-    // 다르다), test 가 바뀌는 자리에만 선을 그어 덩어리로 읽히게 한다.
-    let prevNo = null;
-    for (const r of rows) {
-      const no = r.einecn_no == null ? "" : String(r.einecn_no);
-      const tr = el("tr", (prevNo !== null && no !== prevNo) ? { class: "ein-new" } : {});
-      prevNo = no;
+    // 수만큼 줄로 나온다. 줄은 그대로 두고(step 마다 적용 wafer 가 다르다)
+    // 같은 값이 이어지는 칸만 합친다.
+    const spans = {};
+    for (const c of Object.keys(EIN_MERGE_KEYS)) {
+      spans[c] = einRowSpans(rows, EIN_MERGE_KEYS[c]);
+    }
+
+    rows.forEach((r, i) => {
+      // test 가 바뀌는 자리에만 선을 그어 덩어리로 읽히게 한다
+      const tr = el("tr", (i > 0 && spans.einecn_no[i] > 0) ? { class: "ein-new" } : {});
       for (const c of EIN_COLS) {
-        const v = r[c];
-        const td = el("td", { text: v == null ? "" : String(v) });
+        const span = spans[c] ? spans[c][i] : 1;
+        if (!span) continue;                 // 위 칸이 덮고 있는 자리
+        const td = el("td", { text: einText(r[c]) });
+        if (span > 1) td.rowSpan = span;
         if (c === "einecn_no") {
           td.className = "ein-no";
-          // title 은 표에 넣기엔 길고 같은 test 의 모든 줄에서 같은 값이라,
-          // einecn_no 에 마우스를 올렸을 때만 뜨게 둔다
-          const t = r.title;
-          if (t != null && String(t) !== "") td.title = String(t);
+          // title/reason 은 표에 넣기엔 길고 같은 test 의 모든 줄에서 같은
+          // 값이라, einecn_no 에 마우스를 올렸을 때 두 줄로 같이 띄운다.
+          // 합쳐진 칸이 여러 줄을 덮으므로 그 줄들의 값을 다 모은다 --
+          // 줄마다 다른 값이 들어 있어도 조용히 하나만 보여주지 않도록.
+          const group = rows.slice(i, i + span);
+          const uniq = (key) => [...new Set(group.map(g => einText(g[key])).filter(s => s !== ""))];
+          const titles = uniq("title"), reasons = uniq("reason");
+          if (titles.length || reasons.length) {
+            td.title = `title : ${titles.join(" / ") || "-"}`
+                     + `\nreason : ${reasons.join(" / ") || "-"}`;
+          }
         }
         tr.appendChild(td);
       }
       for (const w of EIN_WAFERS) {
-        const on = String(r[w] == null ? "" : r[w]).trim().toUpperCase() === "V";
+        const on = einText(r[w]).trim().toUpperCase() === "V";
         tr.appendChild(el("td", { class: on ? "ein-waf" : "ein-waf ein-blank",
                                   text: on ? "V" : "" }));
       }
       table.appendChild(tr);
-    }
+    });
     body.appendChild(table);
   }
   document.getElementById("einModal").hidden = false;
