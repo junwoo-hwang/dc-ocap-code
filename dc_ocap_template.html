@@ -1088,10 +1088,14 @@ const EIN_COLS = ["einecn_no", "step_seq", "step_desc", "ppid", "ein_ecn_type"];
 // 위 줄과 값이 같으면 칸을 합친다. 무엇이 같아야 합치는지는 왼쪽 칸까지
 // 따진다: 같은 step_seq 라도 test 가 다르면 einecn_no 칸이 이미 갈라져
 // 있으므로, 그 아래 칸이 test 를 가로질러 합쳐지면 표가 어긋난다.
+// ein_ecn_type 은 test 의 성격이라 einecn_no 와 같은 범위로 합친다. 그 사이
+// ppid 는 줄마다 달라 안 합치지만, 칸 하나를 건너뛴 병합이라 표는 어긋나지
+// 않는다 -- ppid 가 몇 줄이든 그 test 는 통째로 EIN 이거나 ECN 이다.
 const EIN_MERGE_KEYS = {
   einecn_no: ["einecn_no"],
   step_seq: ["einecn_no", "step_seq"],
   step_desc: ["einecn_no", "step_seq", "step_desc"],
+  ein_ecn_type: ["einecn_no", "ein_ecn_type"],
 };
 const EIN_WAFERS = Array.from({ length: 25 }, (_, i) => String(i + 1));
 
