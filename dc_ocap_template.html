@@ -222,11 +222,20 @@
   .modal-head button { border: none; background: none; cursor: pointer;
                        font-size: 1rem; color: #667085; padding: 0 4px; }
   .modal-head button:hover { color: #d33; }
-  .modal-body { padding: 8px 12px 12px; overflow: auto; }
-  /* 세로는 절반으로 줄인다 (72vh -> 36vh). 줄이 적으면 어차피 내용만큼만
-     커지고, 많을 때만 이 높이에서 멈춘다. 가로는 1.25배 (1180 -> 1475px) --
-     화면이 좁으면 96vw 가 먼저 걸리므로 넘치지는 않는다 */
-  .modal-box.modal-wide { max-width: min(1475px, 96vw); max-height: 36vh; }
+  /* sticky 는 '스크롤 상자의 padding box' 를 기준으로 붙는다. 여기에 padding
+     을 주면 고정된 머리글이 그만큼 안쪽에 붙어, 머리글 위에 빈 띠가 생기고
+     그 틈으로 줄이 지나간다. 그래서 여백은 상자가 아니라 안의 내용이 갖는다.
+     (DC OCAP 리스트에서 이미 한 번 겪은 것과 같은 문제다.) */
+  .modal-body { padding: 0; overflow: auto; }
+  .modal-body > * { margin: 8px 0 12px; }
+  /* 좌우 여백도 상자가 아니라 양 끝 칸이 갖는다 -- 왼쪽에 고정된 einecn_no
+     칸이 상자 padding 만큼 안쪽에 붙어 그 틈으로 다른 칸이 비쳐 보이지 않게 */
+  .modal-body th:first-child, .modal-body td:first-child { padding-left: 12px; }
+  .modal-body th:last-child, .modal-body td:last-child { padding-right: 12px; }
+  /* 세로는 절반으로 줄였다가 (72vh -> 36vh) 4% 키운 37.4vh. 줄이 적으면
+     어차피 내용만큼만 커지고, 많을 때만 이 높이에서 멈춘다. 가로는 1.25배
+     뒤 다시 4% 키운 1534px -- 화면이 좁으면 96vw 가 먼저 걸려 넘치지 않는다 */
+  .modal-box.modal-wide { max-width: min(1534px, 96vw); max-height: 37.4vh; }
 
   /* 차트 캡션 줄. 캡션은 왼쪽, EINECN 버튼은 오른쪽 끝에 둔다 */
   .chart-foot { display: flex; align-items: center; justify-content: space-between;
