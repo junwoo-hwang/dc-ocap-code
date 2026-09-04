@@ -232,10 +232,16 @@
      칸이 상자 padding 만큼 안쪽에 붙어 그 틈으로 다른 칸이 비쳐 보이지 않게 */
   .modal-body th:first-child, .modal-body td:first-child { padding-left: 12px; }
   .modal-body th:last-child, .modal-body td:last-child { padding-right: 12px; }
-  /* 세로는 절반으로 줄였다가 (72vh -> 36vh) 4% 키운 37.4vh. 줄이 적으면
-     어차피 내용만큼만 커지고, 많을 때만 이 높이에서 멈춘다. 가로는 1.25배
-     뒤 다시 4% 키운 1534px -- 화면이 좁으면 96vw 가 먼저 걸려 넘치지 않는다 */
-  .modal-box.modal-wide { max-width: min(1534px, 96vw); max-height: 37.4vh; }
+  /* 세로 37.4vh 에서 1.5배 키운 56vh. 줄이 적으면 어차피 내용만큼만 커지고,
+     많을 때만 이 높이에서 멈춘다. 가로는 1534px -- 화면이 좁으면 96vw 가
+     먼저 걸려 넘치지 않는다 */
+  .modal-box.modal-wide { max-width: min(1534px, 96vw); max-height: 56vh; }
+  /* 가운데 정렬이면 화면 아래쪽으로 처져 보인다. 위에서 띄워 앉힌다 */
+  #einModal { align-items: flex-start; padding-top: 7vh; }
+  /* 제목이 길어지면(item 목록) 뒤에서부터 "..." 로 자른다. flex 안에서는
+     min-width:0 이 없으면 줄어들지 않아 잘리는 대신 넘쳐 버린다 */
+  #einModalTitle { min-width: 0; overflow: hidden;
+                   text-overflow: ellipsis; white-space: nowrap; }
 
   /* 차트 캡션 줄. 캡션은 왼쪽, EINECN 버튼은 오른쪽 끝에 둔다 */
   .chart-foot { display: flex; align-items: center; justify-content: space-between;
@@ -1140,19 +1146,22 @@ function closeEinModal() {
 function openEinModal(rootLot) {
   if (!rootLot) return;
   const rows = splitRowsForLot(state.product, rootLot);
-  // 그 lot 에서 OCAP 이 걸린 wafer. 표의 1~25 칸(적용된 wafer)과 곧바로
-  // 견주라고 제목에 적는다. dc 전체를 보는 이유는 팝업 자체가 root_lot
-  // 단위이기 때문이다 -- 지금 고른 hold 건 하나가 아니라 그 lot 이 기준이다.
+  // 그 lot 에서 OCAP 이 걸린 wafer 와 item. 표의 1~25 칸(적용된 wafer)과
+  // 곧바로 견주라고 제목에 적는다. dc 전체를 보는 이유는 팝업 자체가
+  // root_lot 단위이기 때문이다 -- 지금 고른 hold 건 하나가 아니라 그 lot 이
+  // 기준이다. item 은 길어질 수 있어 맨 뒤에 둔다: 제목이 칸을 넘으면
+  // CSS 가 뒤에서부터 "..." 로 자르므로, 잘리는 쪽이 item 이 된다.
   const lotKey = normLot(rootLot);
-  const heldWafers = sortWafers(
-    (DATA.dc[state.product] || [])
-      .filter(r => normLot(r.root_lot_id) === lotKey)
-      .map(r => r.wafer_id)
-  );
+  const heldRows = (DATA.dc[state.product] || [])
+    .filter(r => normLot(r.root_lot_id) === lotKey);
+  const heldWafers = sortWafers(heldRows.map(r => r.wafer_id));
+  const heldItems = uniqueOrdered(heldRows.map(r => r.item_id));
   document.getElementById("einModalTitle").textContent =
-    `EINECN 현황 · ${state.product} · ${normLot(rootLot)}`
-    + ` · OCAP WF ${heldWafers.length ? heldWafers.join(",") : "없음"}`
-    + (rows.length ? ` · ${rows.length}건` : "");
+    [`EINECN 현황`, state.product, normLot(rootLot),
+     heldWafers.length ? heldWafers.join(",") : "없음",
+     ...(rows.length ? [`${rows.length}건`] : []),
+     ...(heldItems.length ? [heldItems.join(",")] : []),
+    ].join(" · ");
   const body = document.getElementById("einModalBody");
   body.innerHTML = "";
   if (!rows.length) {
