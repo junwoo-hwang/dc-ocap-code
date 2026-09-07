@@ -107,8 +107,9 @@ SPLIT_REASONS = [
     "설비 alarm 이력 연계 확인",
     "양산 적용 전 소량 평가",
 ]
-SPLIT_N_WAFER = 25
-SPLIT_WAFER_COLS = [str(n) for n in range(1, SPLIT_N_WAFER + 1)]
+# wafer 칸(1~25) 목록은 아래 SPLIT_WAFER_COLUMNS 하나뿐이다. 여기서 또
+# 만들면 두 벌이 되고, 이름까지 비슷해서(SPLIT_WAFER_COLS vs _COLUMNS) 어느
+# 쪽을 고쳤는지 알기 어려워진다. 함수 안에서 쓰므로 정의 순서는 상관없다.
 
 # product is identified by process_id: KNNU=uly, KNJO=sol, KNIK=tts
 PRODUCT_CONFIG = {
@@ -486,13 +487,13 @@ def generate_split_for_product(product: str, trend_df: pd.DataFrame,
                         "reason": reason,
                         "process_id": cfg["process_id"],
                     }
-                    for n in range(1, SPLIT_N_WAFER + 1):
-                        row[str(n)] = "V" if n in hit else ""
+                    for col in SPLIT_WAFER_COLUMNS:
+                        row[col] = "V" if int(col) in hit else ""
                     rows.append(row)
 
     return pd.DataFrame(rows)[
         ["einecn_no", "root_lot_id", "ppid", "ein_ecn_type"]
-        + SPLIT_WAFER_COLS
+        + SPLIT_WAFER_COLUMNS
         + ["step_seq", "step_desc", "title", "reason", "process_id"]
     ]
 
@@ -549,6 +550,7 @@ def pull_data():
 import base64
 import gzip
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -607,6 +609,99 @@ SPLIT_WAFER_COLUMNS = [str(n) for n in range(1, 26)]
 # 쓰고, title 은 einecn_no 에 마우스를 올렸을 때 뜬다 -- 둘 다 표에는 없다.
 SPLIT_REQUIRED = ["root_lot_id", "title", "einecn_no", "step_seq", "step_desc",
                   "ppid", "reason", "ein_ecn_type", *SPLIT_WAFER_COLUMNS]
+
+
+# ======================================================================
+# 정적 리포트(dc_ocap_template.html)와 반드시 같아야 하는 값들.
+#
+# 여기가 유일한 출처다. build_dc_ocap_html() 이 shared_constants_js() 로
+# 브라우저에 넘겨주므로, 템플릿에는 같은 숫자를 다시 적지 않는다.
+# 예전에는 양쪽에 손으로 적어 두었다가 조용히 갈라졌다 -- 배경 타점 상한이
+# 한쪽은 2500, 다른 쪽은 1200 이 되어 같은 데이터로 다른 그림을 그렸다.
+# ======================================================================
+LEGEND_FIELD_OPTIONS = {
+    "없음 (기본)": None,
+    "probe_card_id": "probe_card_id",
+    "eqp_id": "eqp_id",
+    "lot_type": "lot_type",
+    "rw_cnt": "rw_cnt",
+}
+# red means "past the scrap limit" and blue "past the control limit"
+LIMIT_COLORS = {"scrap": "red", "control": "blue"}
+WAC_GRAY, WAC_SAME = "lightgray", "dimgray"
+WAC_SIZE, WAC_SIZE_SEL = 6, 14
+# 배경(회색) 타점이 이보다 많으면 고르게 솎는다. 260px 차트에 수천 점을
+# 찍어봐야 대부분 겹치는데, plotly 는 타점마다 <path> 를 하나씩 만들기
+# 때문에 비용은 점 수에 그대로 비례한다 (실측: 2500 점이면 한 번 훑을 때
+# 긴 작업 합계 7.9초, 1200 점이면 5.0초).
+# CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게 봐야 할 신호다.
+WAC_MAX_GRAY = 1200
+
+# 이상값(어이없이 큰 값) 판정. median + MAD 를 쓰는 이유는 평균/표준편차가
+# 센티널 값 하나에 통째로 망가지기 때문이다.
+#
+# 5로 잡은 이유: 관리선(UCL/LCL)이 보통 ±3시그마다. 3으로 자르면 걸러야 할
+# 이상값이 아니라 정작 봐야 할 CL OUT 타점을 지우게 된다 (모의 데이터
+# 8000점에서 3시그마는 20개를 걸렀는데 그 중 18개가 멀쩡한 값이었고,
+# 5시그마는 진짜 이상값 2개만 걸렀다).
+OUTLIER_K = 5
+OUTLIER_MIN_N = 20      # 이보다 적으면 흩어진 정도를 못 믿는다
+
+
+def shared_constants_js() -> str:
+    """위 값들을 브라우저가 읽을 수 있는 한 줄짜리 JS 로 만든다."""
+    return "const SHARED = " + json.dumps({
+        "legendFieldOptions": LEGEND_FIELD_OPTIONS,
+        "limitColors": LIMIT_COLORS,
+        "wacGray": WAC_GRAY,
+        "wacSame": WAC_SAME,
+        "wacSize": WAC_SIZE,
+        "wacSizeSel": WAC_SIZE_SEL,
+        "wacMaxGray": WAC_MAX_GRAY,
+        "outlierK": OUTLIER_K,
+        "outlierMinN": OUTLIER_MIN_N,
+        "splitWaferColumns": SPLIT_WAFER_COLUMNS,
+        "limitCols": list(LIMIT_COLS),
+    }, ensure_ascii=False, separators=(",", ":")) + ";"
+
+
+def robust_bounds(values) -> tuple[float, float] | None:
+    """이상값을 가르는 [lo, hi]. 못 정하겠으면 None (= 아무것도 안 거른다).
+
+    median + MAD x 1.4826 으로 표준편차와 같은 눈금을 만든다. 값의 절반
+    이상이 똑같아 MAD 가 0 이면 사분위로 다시 재고, 그래도 0 이면 사실상
+    값이 하나뿐이라 거를 것이 없다.
+    """
+    v = pd.Series(values, dtype="float64").dropna()
+    if len(v) < OUTLIER_MIN_N:
+        return None
+    med = float(v.median())
+    scale = 1.4826 * float((v - med).abs().median())
+    if not scale > 0:
+        q1, q3 = float(v.quantile(0.25)), float(v.quantile(0.75))
+        scale = (q3 - q1) / 1.349
+    if not scale > 0:
+        return None
+    return med - OUTLIER_K * scale, med + OUTLIER_K * scale
+
+
+def is_absurd(values, bounds, lim: dict | None, held) -> pd.Series:
+    """숨길 값인가. values 와 같은 index 의 boolean Series 를 돌려준다.
+
+    hold 로 잡힌 wafer 는 절대 숨기지 않는다 -- hold 가 걸린 이유가 바로 그
+    극단값인 경우가 많아서, 숨기면 왜 걸렸는지가 사라진다. 규격 안에 있는
+    값도 숨기지 않는다: 아무리 median 에서 멀어도 규격을 지킨 값을
+    '어이없다' 고 할 수는 없다.
+    """
+    v = pd.Series(values, dtype="float64")
+    if bounds is None:
+        return pd.Series(False, index=v.index)
+    lo, hi = bounds
+    out = (v < lo) | (v > hi)
+    if lim is not None and "lsl" in lim and "usl" in lim:
+        in_spec = (v >= lim["lsl"]) & (v <= lim["usl"])
+        out &= ~in_spec.fillna(False)
+    return out & ~pd.Series(held, index=v.index).fillna(False).astype(bool)
 
 
 def item_columns(trend_df) -> list:
@@ -869,8 +964,24 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _held_pairs(dc_df, item_col) -> set:
+    """그 item 으로 hold 가 걸린 (root_lot_id, wafer_id) 쌍.
+
+    이상값을 거를 때 예외로 둘 대상을 고르는 데 쓴다. dc 의 item_id 와
+    trend 의 컬럼 이름은 대소문자/공백이 다를 수 있어 양쪽을 맞춰 본다.
+    """
+    if not isinstance(dc_df, pd.DataFrame) or dc_df.empty:
+        return set()
+    if not {"item_id", "root_lot_id", "wafer_id"} <= set(dc_df.columns):
+        return set()
+    want = str(item_col).strip().lower()
+    rows = dc_df[dc_df["item_id"].map(lambda v: str(v).strip().lower() == want)]
+    return set(zip(rows["root_lot_id"].map(norm_lot), rows["wafer_id"].map(norm_wafer)))
+
+
 def check_data(product_dc: dict, trend_frames: dict,
-               spec_frames: dict | None = None) -> tuple[list[str], list[str]]:
+               spec_frames: dict | None = None,
+               split_frames: dict | None = None) -> tuple[list[str], list[str]]:
     """Return (fatal, warnings) about what pull_data() handed back.
 
     Runs on the real data the first time it is plugged in, so a schema
@@ -1014,6 +1125,47 @@ def check_data(product_dc: dict, trend_frames: dict,
                             f"({len(miss)}/{len(items)}종). 해당 차트는 관리선 없이 회색으로만 그려집니다."
                         )
 
+        # split(EIN/ECN 적용 이력). 화면에서는 EINECN 버튼을 눌러야 보이는
+        # 것이라, 잘못돼도 나머지 대시보드는 멀쩡히 돈다 -- 그래서 전부
+        # 경고다. 다만 정적 리포트를 만들 때는 필요한 칸이 없으면 빌드가
+        # 멈추므로, 그 전에 여기서 같은 목록으로 먼저 알려준다.
+        split_df = (split_frames or {}).get(product)
+        if split_frames is None:
+            pass                                   # 부르는 쪽이 split 을 안 넘겼다
+        elif not isinstance(split_df, pd.DataFrame):
+            warnings.append(
+                f"{product.lower()}_split: DataFrame 이 아닙니다 "
+                f"({type(split_df).__name__}). EINECN 팝업이 비어 보입니다."
+            )
+        elif split_df.empty:
+            warnings.append(
+                f"{product.lower()}_split: 비어 있습니다. "
+                f"split 을 process_id 로 자르는 조건을 확인하세요."
+            )
+        else:
+            missing = [c for c in SPLIT_REQUIRED if c not in split_df.columns]
+            if missing:
+                warnings.append(
+                    f"{product.lower()}_split: 컬럼 없음 -> {', '.join(map(str, missing[:8]))}"
+                    + (" ..." if len(missing) > 8 else "")
+                    + ". 1~25 는 wafer 번호 칸입니다 (comp_id_list 를 펼친 결과). "
+                    "정적 리포트 빌드는 이 상태로는 멈춥니다."
+                )
+            else:
+                # 그 lot 의 이력을 찾는 열쇠라, 여기가 어긋나면 팝업이 늘
+                # 비어 있는데 화면에는 아무 오류도 안 뜬다
+                trend_lots = (set(trend_df["root_lot_id"].map(norm_lot))
+                              if isinstance(trend_df, pd.DataFrame)
+                              and "root_lot_id" in trend_df.columns else set())
+                split_lots = set(split_df["root_lot_id"].map(norm_lot))
+                if trend_lots and not (split_lots & trend_lots):
+                    warnings.append(
+                        f"{product.lower()}_split: root_lot_id 가 "
+                        f"{product.lower()}_trend 와 하나도 겹치지 않습니다 "
+                        f"(EINECN 팝업이 늘 비어 보입니다). split 예시 "
+                        f"{sorted(split_lots)[:3]}"
+                    )
+
     return fatal, warnings
 
 
@@ -1049,21 +1201,13 @@ def load_data():
     frames = pull_data()
     # checked here rather than on every rerun: it scans the whole trend
     # tables, which is far too slow to repeat on each click
-    dc_frames, trend_frames, spec_frames, _split_frames = frames_by_product(frames)
-    problems, warnings = check_data(dc_frames, trend_frames, spec_frames)
+    dc_frames, trend_frames, spec_frames, split_frames = frames_by_product(frames)
+    problems, warnings = check_data(dc_frames, trend_frames, spec_frames, split_frames)
     # stamped inside the cache, so the header reports when the data was
     # actually fetched rather than when the page was last re-rendered
     loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
     return (*frames, loaded_at, problems, warnings)
 
-
-LEGEND_FIELD_OPTIONS = {
-    "없음 (기본)": None,
-    "probe_card_id": "probe_card_id",
-    "eqp_id": "eqp_id",
-    "lot_type": "lot_type",
-    "rw_cnt": "rw_cnt",
-}
 
 # "_hover_time" rather than "tkout_time" itself: the x-axis needs the real
 # datetime column, and a plain string reads better in the hover box than
@@ -1084,7 +1228,6 @@ HOVER_TEMPLATE = (
 # size, like orange or light blue -- are kept out of this palette. 20
 # entries so a high-cardinality field (many probe cards / eqp ids in the
 # queried window) doesn't wrap onto a duplicate color too quickly.
-LIMIT_COLORS = {"scrap": "red", "control": "blue"}
 CATEGORY_COLORS = [
     "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
     "#e377c2", "#7f7f7f", "#1b9e77", "#a6761d", "#66a61e",
@@ -1207,12 +1350,16 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
     bad = plot_df[is_bad_row]
     in_spec = ~(past_scrap | past_control)
 
-    # exact-zero readings are almost always measurement glitches, not real
-    # excursions -- dropped from the background context points only, so a
-    # handful of them don't blow out the y-axis. Held wafers are exempt: a
-    # hold is often triggered by exactly this kind of extreme value, and
-    # hiding it would hide the reason it was held in the first place.
-    others = plot_df[~is_bad_row & (plot_df[item_id] != 0)]
+    # 어이없는 값은 배경에서만 뺀다. 이런 값 하나가 y축을 통째로 늘려서
+    # 정작 봐야 할 흐름이 한 줄로 눌려 버린다. hold 로 잡힌 wafer 는
+    # 예외다 -- hold 사유가 바로 그 값인 경우가 많다.
+    #
+    # '정확히 0 = 계측 실패' 로 보고 버리던 규칙이 여기 있었는데, 값이 0
+    # 근처인 item(누설 같은 것)에서는 멀쩡한 값을 소리 없이 지웠다. 진짜
+    # 계측 실패인 0 은 어차피 아래 5시그마 규칙에 걸린다.
+    bounds = robust_bounds(values[~is_bad_row])
+    absurd = is_absurd(values, bounds, lim, is_bad_row)
+    others = plot_df[~is_bad_row & ~absurd]
 
     fig = go.Figure()
 
@@ -1315,12 +1462,7 @@ def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
 # 정적 리포트(dc_ocap_template.html)의 WAC 페이지와 같은 규칙/색/크기를
 # 쓴다 -- 값이 갈리면 두 화면이 다른 판정을 내리게 된다.
 # ====================================================================
-WAC_GRAY, WAC_SAME = "lightgray", "dimgray"
-WAC_SIZE, WAC_SIZE_SEL = 6, 14
-# 배경(회색) 타점이 이보다 많으면 고르게 솎는다. 260px 차트에 수천 점을
-# 찍어봐야 대부분 겹치고, 브라우저로 넘길 JSON 만 그만큼 커진다.
-# CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게 봐야 할 신호다.
-WAC_MAX_GRAY = 2500
+# 색/크기/솎는 기준은 위 '정적 리포트와 같아야 하는 값들' 에 있다
 WAC_CHART_HEIGHT = 260
 WAC_GRID_COLS = 2
 # grp 값 -> (범례 이름, 색, 범례 순서). 0=정상 1=CL OUT 2=SL OUT
@@ -1345,7 +1487,7 @@ def wac_item_points(product: str, item_col: str, stamp: str) -> dict:
     비싸다. 대신 값싼 문자열을 키로 쓰고 프레임은 (이미 캐시된) load_data()
     에서 가져온다 -- 데이터가 새로 적재되면 stamp 가 바뀌어 같이 무효화된다.
     """
-    _dc, trend_frames, spec_frames, _split = frames_by_product(load_data())
+    dc_frames, trend_frames, spec_frames, _split = frames_by_product(load_data())
     trend_df, spec_df = trend_frames[product], spec_frames[product]
 
     vals = pd.to_numeric(trend_df[item_col], errors="coerce")
@@ -1353,6 +1495,20 @@ def wac_item_points(product: str, item_col: str, stamp: str) -> dict:
     d, v = trend_df[keep], vals[keep]
     spec_rows = item_spec_rows(spec_df, item_col)
     lim = limits_asof(spec_rows, d["tkout_time"])
+
+    # 어이없는 값은 빼고 그린다. 한 점이 y축을 통째로 늘려 놓으면 나머지가
+    # 한 줄로 눌려서 아무것도 안 보인다. hold 로 잡힌 wafer 는 남긴다 --
+    # hold 사유가 바로 그 값인 경우가 많다 (정적 리포트와 같은 규칙).
+    held_pairs = _held_pairs(dc_frames.get(product), item_col)
+    is_held = pd.Series(
+        [(lot, wf) in held_pairs
+         for lot, wf in zip(d["root_lot_id"].map(norm_lot), d["wafer_id"].map(norm_wafer))],
+        index=d.index,
+    )
+    bounds = robust_bounds(v[~is_held])
+    shown = ~is_absurd(v, bounds, lim, is_held)
+    d, v, is_held = d[shown], v[shown], is_held[shown]
+    lim = {k: s[shown] for k, s in lim.items()}
 
     # 규격을 벗어난 점이 관리선도 벗어난 건 당연하므로, SL 이 이기고 둘은
     # 서로 겹치지 않는다 (build_scatter 와 같은 규칙)
@@ -2155,6 +2311,16 @@ TEMPLATE_PATH = HERE / "dc_ocap_template.html"
 OUTPUT_PATH = HERE / "dc_ocap.html"
 
 
+class BuildError(Exception):
+    """리포트를 만들 수 없다. 메시지는 그대로 사람이 읽는 안내문이다.
+
+    SystemExit 대신 쓴다: 예전에는 SystemExit 를 던졌는데, 그건 이 함수를
+    import 해서 쓰는 쪽(스케줄러 스크립트, 노트북, 테스트)의 프로세스를
+    통째로 죽여 버린다. 프로세스를 끝낼지는 부르는 쪽이 정할 일이다 --
+    이 파일을 직접 실행했을 때만 __main__ 에서 종료 코드로 바꾼다.
+    """
+
+
 
 def _clean(value):
     """One cell -> a JSON-safe value: NaN/NaT -> None, Timestamp -> ISO
@@ -2231,7 +2397,7 @@ def _split_for_export(split_df, keep_lots=None) -> pd.DataFrame:
         return pd.DataFrame(columns=SPLIT_REQUIRED)
     missing = [c for c in SPLIT_REQUIRED if c not in split_df.columns]
     if missing:
-        raise SystemExit(
+        raise BuildError(
             "split 에 EINECN 팝업이 요구하는 컬럼이 없습니다: "
             + ", ".join(map(str, missing))
             + f"\n실제 컬럼: {list(split_df.columns)}"
@@ -2266,9 +2432,9 @@ def build_dc_ocap_html() -> Path:
     # a broken dc_ocap.html. Warnings are printed but must not stop the
     # build: this runs hourly and uploads to S3, so failing over a few
     # wafers missing from trend would freeze the portal on a stale report.
-    problems, warnings = check_data(product_dc, product_trend, product_spec)
+    problems, warnings = check_data(product_dc, product_trend, product_spec, product_split)
     if problems:
-        raise SystemExit(
+        raise BuildError(
             "pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:\n"
             + "\n".join(f"- {p}" for p in problems)
         )
@@ -2335,7 +2501,7 @@ def build_dc_ocap_html() -> Path:
         exactly this, so fail here instead.
         """
         if placeholder not in text:
-            raise SystemExit(
+            raise BuildError(
                 f"{TEMPLATE_PATH.name} 에서 '{placeholder}' 를 찾지 못했습니다.\n"
                 f"app.py 와 {TEMPLATE_PATH.name} 의 버전이 서로 다른 것 같습니다 "
                 f"(둘은 같은 커밋의 짝으로 써야 합니다).\n"
@@ -2345,6 +2511,10 @@ def build_dc_ocap_html() -> Path:
 
     html = fill(template, "__GENERATED_AT__", generated_at)
     html = fill(html, "__DATA_B64__", encoded)
+    # 두 화면이 같은 판정을 내려야 하는 값들. 템플릿에 같은 숫자를 다시
+    # 적어두지 않으므로, 여기서 안 넣으면 페이지가 아예 안 뜬다 (fill 이
+    # 플레이스홀더가 없으면 멈추므로 조용히 빠질 수는 없다)
+    html = fill(html, "/*__SHARED_CONSTANTS__*/", shared_constants_js())
     # embedded rather than loaded from the public CDN: the portal server or
     # its viewers may not have outbound internet access, only reachability
     # to wherever this file itself gets hosted
@@ -2378,4 +2548,10 @@ if __name__ == "__main__":
         st.set_page_config(page_title="DC OCAP", layout="wide")
         show_dc_ocap()
     else:
-        build_dc_ocap_html()
+        # BuildError 는 사람이 읽는 안내문이다. traceback 없이 그대로 보여
+        # 주고 0 이 아닌 코드로 끝낸다 -- 스케줄러가 실패를 알아채야 한다.
+        try:
+            build_dc_ocap_html()
+        except BuildError as err:
+            print(f"\n빌드 실패: {err}", file=sys.stderr)
+            raise SystemExit(1)

@@ -185,10 +185,10 @@ def check_spec(product_spec, product_trend):
 
 
 def check_split(product_split, product_trend):
-    """EIN/ECN 적용 이력. 아직 화면에 쓰지는 않지만, 한 테이블을 process_id
-    로 잘라 만드는 것이라 '잘못 잘라서 통째로 빈' 경우가 제일 흔하다."""
+    """EIN/ECN 적용 이력 (차트 밑 EINECN 버튼이 띄우는 것). 한 테이블을
+    process_id 로 잘라 만드는 것이라 '잘못 잘라서 통째로 빈' 경우가 제일 흔하다."""
     expected = {name: cfg["process_id"] for name, cfg in app.PRODUCT_CONFIG.items()}
-    wafer_cols = [str(n) for n in range(1, 26)]
+    wafer_cols = app.SPLIT_WAFER_COLUMNS      # 목록은 app.py 한 곳에만 둔다
     for name, df in product_split.items():
         if not isinstance(df, pd.DataFrame):
             print(f"  {name.lower()}_split: !! DataFrame 이 아님 ({type(df).__name__})")
@@ -231,8 +231,11 @@ def check_split(product_split, product_trend):
                      "조회 기간이 서로 다르면 정상입니다.")
 
 
-def check_check_data(product_dc, product_trend, product_spec):
-    result = safe("check_data()", app.check_data, product_dc, product_trend, product_spec)
+def check_check_data(product_dc, product_trend, product_spec, product_split):
+    # split 까지 같이 넘긴다 -- 화면이 실제로 부르는 것과 같은 인자로
+    # 불러야, 여기서 통과한 것이 화면에서도 통과한다
+    result = safe("check_data()", app.check_data,
+                  product_dc, product_trend, product_spec, product_split)
     if result is None:
         return
     problems, warnings = result
@@ -723,7 +726,7 @@ def main():
     safe("2단계", check_columns, product_dc, product_trend)
 
     head("3. check_data() 결과 (이게 걸리면 화면에 에러가 떴어야 함)")
-    safe("3단계", check_check_data, product_dc, product_trend, product_spec)
+    safe("3단계", check_check_data, product_dc, product_trend, product_spec, product_split)
 
     head("4. hold_time / rw_cnt / status 값 확인  << 조용히 틀리는 원인")
     safe("4단계", check_key_columns, product_dc)

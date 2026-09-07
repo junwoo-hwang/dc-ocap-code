@@ -1,0 +1,3 @@
+# 테스트용. 운영에는 필요 없다 -- pytest tests/ 로 돌린다.
+-r requirements.txt
+pytest==9.1.1

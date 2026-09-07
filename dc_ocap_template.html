@@ -460,6 +460,10 @@
 // so it arrives as text but has to be inflated before anything can read
 // it. That makes startup async -- DATA stays null until boot() below
 // fills it in, and nothing may touch it before then.
+// app.py 가 넣어주는 값들. 두 화면이 반드시 같은 판정을 내려야 하는 것들
+// (솎는 기준, 이상값 시그마, 색, 크기, legend 목록)은 여기 하나에서만 온다
+// -- 브라우저 쪽에 같은 숫자를 또 적어두면 조용히 갈라진다.
+/*__SHARED_CONSTANTS__*/
 const DATA_B64 = "__DATA_B64__";
 let DATA = null;
 
@@ -503,7 +507,7 @@ async function loadData() {
 // 관리선은 DATA.spec 에 (item_id, from_time) 개정 이력으로 들어 있다.
 // 규격이 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 점마다 그때
 // 유효했던 개정을 찾아 쓴다. (app.py 의 limits_asof 와 같은 규칙)
-const LIMIT_COLS = ["ucl","lcl","usl","lsl"];
+const LIMIT_COLS = SHARED.limitCols;
 const LIMIT_LINE_STYLE = { ucl:["blue","UCL"], lcl:["blue","LCL"],
                            usl:["red","USL"],  lsl:["red","LSL"] };
 const EMPTY_LIMITS = { ucl:null, lcl:null, usl:null, lsl:null };
@@ -535,13 +539,7 @@ function limitsAt(revisions, t) {
   }
   return EMPTY_LIMITS;      // 첫 개정보다 앞선 측정
 }
-const LEGEND_FIELD_OPTIONS = {
-  "없음 (기본)": null,
-  "probe_card_id": "probe_card_id",
-  "eqp_id": "eqp_id",
-  "lot_type": "lot_type",
-  "rw_cnt": "rw_cnt",
-};
+const LEGEND_FIELD_OPTIONS = SHARED.legendFieldOptions;
 const HOVER_TEMPLATE =
   "root_lot_id=%{customdata[0]}<br>" +
   "wafer_id=%{customdata[1]}<br>" +
@@ -559,7 +557,7 @@ const HOVER_TEMPLATE_OUT =
 // 시간축은 '월-일' 만 쓴다 (08-21). 기본값은 구간 길이에 따라 연도나 월
 // 이름이 섞여 나와서, 차트를 여러 개 늘어놓으면 축마다 표기가 달라진다.
 const TIME_TICK_FORMAT = "%m-%d";
-const LIMIT_COLORS = { scrap: "red", control: "blue" };
+const LIMIT_COLORS = SHARED.limitColors;
 const CATEGORY_COLORS = [
   "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
   "#e377c2", "#7f7f7f", "#1b9e77", "#a6761d", "#66a61e",
@@ -1115,7 +1113,7 @@ const EIN_MERGE_KEYS = {
   ppid: ["einecn_no", "step_seq", "step_desc", "ppid"],
   ein_ecn_type: ["einecn_no", "ein_ecn_type"],
 };
-const EIN_WAFERS = Array.from({ length: 25 }, (_, i) => String(i + 1));
+const EIN_WAFERS = SHARED.splitWaferColumns;
 
 function einText(v) {
   return v == null ? "" : String(v);
@@ -1505,8 +1503,8 @@ function wacRows(product, itemCol) {
   return out;
 }
 
-const WAC_SIZE = 6, WAC_SIZE_SEL = 14;
-const WAC_GRAY = "lightgray", WAC_SAME = "dimgray";
+const WAC_SIZE = SHARED.wacSize, WAC_SIZE_SEL = SHARED.wacSizeSel;
+const WAC_GRAY = SHARED.wacGray, WAC_SAME = SHARED.wacSame;
 // 배경(회색) 타점이 이보다 많으면 고르게 솎아서 그린다. 260px 짜리 차트에
 // 수천 점을 찍으면 대부분 겹쳐서 그림은 그대로인데, 다시 그리는 비용만
 // 점 수에 비례해 늘어난다. CL OUT / SL OUT 은 절대 솎지 않는다 -- 그게
@@ -1516,7 +1514,7 @@ const WAC_GRAY = "lightgray", WAC_SAME = "dimgray";
 // 그리기다 (실측: 그리는 함수 147ms 인데 그 프레임은 747ms). 점을 줄이면
 // 거기가 줄어든다 -- 2500 점일 때 긴 작업 합계 7.9초, 1200 점이면 5.0초.
 // 회색은 관리선 안에 든 점뿐이라 솎아도 놓치는 신호가 없다.
-const WAC_MAX_GRAY = 1200;
+const WAC_MAX_GRAY = SHARED.wacMaxGray;
 
 // 차트마다 트레이스 3개를 '고정' 으로 둔다: 회색 / CL OUT / SL OUT.
 // 선택이 바뀌어도 어느 타점이 어느 트레이스에 속하는지는 그대로이고
@@ -2068,8 +2066,8 @@ function monthLabel(m) { return Number(String(m).slice(5, 7)) + "월"; }
 // 이상값이 아니라 정작 봐야 할 CL OUT 타점을 지우게 된다 (모의 데이터
 // 8000점에서 3시그마는 20개를 걸렀는데 그 중 18개가 멀쩡한 값이었고,
 // 5시그마는 진짜 이상값 2개만 걸렀다).
-const OUTLIER_K = 5;
-const OUTLIER_MIN_N = 20;      // 이보다 적으면 흩어진 정도를 못 믿는다
+const OUTLIER_K = SHARED.outlierK;
+const OUTLIER_MIN_N = SHARED.outlierMinN;
 
 function robustBounds(values) {
   if (values.length < OUTLIER_MIN_N) return null;
