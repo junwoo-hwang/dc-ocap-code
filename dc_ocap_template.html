@@ -285,6 +285,20 @@
   .modal-body tr[data-item] { cursor: pointer; }
   .modal-body tr[data-item]:hover td { background: #f1f5f9; }
   .modal-note { font-size: 0.78rem; color: #888; margin-top: 8px; }
+
+  /* 타점을 눌렀을 때 뜨는 조치 내역. hold 건이 여럿이면(재측정) 건마다 한 칸 */
+  .dispo-event { border: 1px solid #e2e8f0; border-radius: 6px;
+                 padding: 8px 10px; margin-bottom: 8px; }
+  .dispo-event:last-of-type { margin-bottom: 0; }
+  .dispo-head { display: flex; align-items: baseline; justify-content: space-between;
+                gap: 10px; margin-bottom: 6px; }
+  .dispo-head span { font-size: 0.78rem; color: #888; white-space: nowrap; }
+  .dispo-inform { font-size: 0.82rem; color: #475467; margin-bottom: 6px; }
+  .dispo-row { display: grid; grid-template-columns: 4.5rem 1fr; gap: 8px;
+               font-size: 0.86rem; padding: 2px 0; }
+  /* comment 는 길다. 줄바꿈해서 다 보여준다 -- 이 팝업의 존재 이유다 */
+  .dispo-row span:last-child { white-space: pre-wrap; word-break: break-word; }
+  .dispo-label { color: #888; }
 </style>
 </head>
 <body>
@@ -1434,6 +1448,45 @@ function renderTrendAndComment(dcAll, dcFiltered) {
 // wafer_id, item_id) 로 뒤져서 comment/owner/code 3줄을 미리 만들어 둔다.
 // 벗어났다고 다 hold 인 건 아니라서, 기록이 없는 쪽이 오히려 흔하다.
 const WAC_NO_HOLD = "(hold 이력 없음)";
+// hover 상자의 최소 너비(표시 칸). owner 가 "-" 하나뿐일 때까지 거기 맞추면
+// comment 가 서너 글자에서 잘려 아무 쓸모가 없다.
+const WAC_HOVER_MIN_CHARS = 24;
+
+// 글자 수가 아니라 '보이는 폭' 으로 잰다. 한글/한자는 라틴 문자의 두 배 폭이라,
+// 글자 수로 자르면 owner 줄에 맞췄다고 해도 상자 너비가 안 맞는다.
+//
+// 전각으로 볼 범위를 하나하나 적는다. "0x10ff 넘으면 전각" 같은 어림으로는
+// 말줄임표(…, U+2026)까지 두 칸으로 세어 자른 줄이 오히려 기준보다 넓어진다.
+function isWideChar(cp) {
+  return (cp >= 0x1100 && cp <= 0x11ff)      // 한글 자모
+      || (cp >= 0x3000 && cp <= 0x303f)      // CJK 문장부호
+      || (cp >= 0x3040 && cp <= 0x30ff)      // 가나
+      || (cp >= 0x3130 && cp <= 0x318f)      // 호환 한글 자모
+      || (cp >= 0x3400 && cp <= 0x4dbf)      // CJK 확장 A
+      || (cp >= 0x4e00 && cp <= 0x9fff)      // CJK 한자
+      || (cp >= 0xac00 && cp <= 0xd7a3)      // 한글 음절
+      || (cp >= 0xf900 && cp <= 0xfaff)      // CJK 호환 한자
+      || (cp >= 0xff00 && cp <= 0xff60)      // 전각 영숫자
+      || (cp >= 0xffe0 && cp <= 0xffe6);
+}
+
+function displayWidth(text) {
+  let w = 0;
+  for (const ch of String(text)) w += isWideChar(ch.codePointAt(0)) ? 2 : 1;
+  return w;
+}
+
+function clipToWidth(text, limit) {
+  if (displayWidth(text) <= limit) return text;
+  let out = "", w = 0;
+  for (const ch of String(text)) {
+    const cw = isWideChar(ch.codePointAt(0)) ? 2 : 1;
+    if (w + cw > limit - 1) break;           // 1 칸은 "…" 자리로 남긴다
+    out += ch; w += cw;
+  }
+  return out + "…";
+}
+const WAC_DISPO_HINT = "클릭하면 전체 내역";
 const _wacDispoCache = new Map();
 
 function escapeHover(text) {
@@ -1459,19 +1512,51 @@ function wacDispo(product, itemCol) {
       if (v && !b[f].includes(v)) b[f].push(v);
     }
   }
-  const line = (arr) => {
-    const t = arr.join(" / ");
-    if (!t) return "-";
-    // 코멘트가 길면 hover 상자가 차트를 덮는다. 한 줄 분량에서 자른다.
-    return escapeHover(t.length > 48 ? t.slice(0, 47) + "…" : t);
-  };
+  // hover 상자의 너비는 owner / code 줄이 정한다. comment 는 대개 그보다
+  // 길어서 그냥 두면 상자가 차트를 덮고, 넓어진 상자가 놓일 자리가 없어
+  // plotly 가 그걸 안쪽으로 밀어 넣으면서 정작 가리키던 타점까지 가린다.
+  // 그래서 그 너비에서 자르고, 전체는 타점을 눌러 팝업으로 본다.
+  const join = (arr) => arr.join(" / ") || "-";
   const out = new Map();
   for (const [k, b] of acc) {
-    out.set(k, `comment : ${line(b.comment)}<br>owner : ${line(b.owner)}`
-               + `<br>code : ${line(b.code)}`);
+    const owner = `owner : ${join(b.owner)}`;
+    const code = `code : ${join(b.code)}`;
+    const cap = Math.max(displayWidth(owner), displayWidth(code), WAC_HOVER_MIN_CHARS);
+    const comment = clipToWidth(`comment : ${join(b.comment)}`, cap);
+    // 안내는 팝업이 실제로 열릴 때만 붙인다. comment 도 owner 도 없으면
+    // 눌러도 팝업이 안 뜨므로(wacHasDispo), 그때 안내를 달면 거짓말이 된다.
+    const clickable = b.comment.length || b.owner.length;
+    out.set(k, [comment, owner, code].map(escapeHover).join("<br>")
+               + (clickable ? `<br><i>${WAC_DISPO_HINT}</i>` : ""));
   }
   _wacDispoCache.set(key, out);
   return out;
+}
+
+// 그 (lot, wafer, item) 으로 걸린 hold 를 hold 건 단위로 돌려준다.
+// 재측정(rework)이면 같은 wafer 가 rw_cnt 0, 1 ... 로 여러 번 걸리고 건마다
+// 조치가 따로 붙는다 -- 팝업은 그걸 합치지 않고 전부 보여준다.
+function wacHoldRecords(product, itemCol, lot, wafer) {
+  const want = String(itemCol).trim().toLowerCase();
+  const rows = (DATA.dc[product] || []).filter(r =>
+    String(r.item_id).trim().toLowerCase() === want
+    && normLot(r.root_lot_id) === normLot(lot)
+    && normWafer(r.wafer_id) === normWafer(wafer));
+  const byEvent = new Map();
+  for (const r of rows) {
+    const k = `${r.lot_id}||${normRwCnt(r.rw_cnt)}`;
+    if (!byEvent.has(k)) byEvent.set(k, r);
+  }
+  return [...byEvent.values()].sort(
+    (a, b) => Number(a.rw_cnt || 0) - Number(b.rw_cnt || 0)
+              || String(a.hold_time).localeCompare(String(b.hold_time)));
+}
+
+// 조치 내역이 하나라도 있어야 팝업을 띄운다. comment 도 owner 도 없으면
+// 보여줄 게 없으므로 원래대로 그 wafer 를 선택하는 것으로 둔다.
+function wacHasDispo(records) {
+  const has = (v) => v !== null && v !== undefined && String(v).trim() !== "";
+  return records.some(r => has(r.comment) || has(r.owner));
 }
 
 // 측정값이 있는 행만 한 번 추려두고 재사용한다. 클릭할 때마다 다시 훑으면
@@ -1729,11 +1814,19 @@ function wacDrawChart(entry) {
     const pt = ev.points && ev.points[0];
     if (!pt || !pt.customdata) return;
     const [root, wafer] = pt.customdata;
+    // 조치 내역이 있으면 팝업으로 전문을 띄운다. 선택도 같이 해 둔다 --
+    // 팝업을 닫으면 원래대로 그 wafer 가 모든 차트에서 커져 있다.
+    const records = wacHoldRecords(state.product, entry.itemCol, root, wafer);
     const cur = state.wacSelected;
-    // 같은 타점을 다시 누르면 선택 해제
-    state.wacSelected = (cur && normLot(cur.rootLotId) === normLot(root)
-                             && normWafer(cur.waferId) === normWafer(wafer))
-      ? null : { rootLotId: root, waferId: wafer };
+    const same = cur && normLot(cur.rootLotId) === normLot(root)
+                     && normWafer(cur.waferId) === normWafer(wafer);
+    if (wacHasDispo(records)) {
+      state.wacSelected = { rootLotId: root, waferId: wafer };
+      wacApplySelection();
+      openWacDispoModal(entry.itemCol, root, wafer, records);
+      return;
+    }
+    state.wacSelected = same ? null : { rootLotId: root, waferId: wafer };  // 다시 누르면 해제
     wacApplySelection();
   });
 }
@@ -2195,6 +2288,40 @@ function openMonthModal(month, s) {
     body.appendChild(table);
     body.appendChild(el("div", { class: "modal-note",
       text: "건수는 lot_id 기준입니다. 줄을 누르면 그 item 차트만 보입니다." }));
+  }
+  document.getElementById("wacModal").hidden = false;
+}
+
+// 타점을 누르면 그 wafer 의 조치 내역을 전부 띄운다. hover 는 자리가 좁아
+// comment 를 잘라서 보여주므로, 전문과 재측정 건은 여기서만 볼 수 있다.
+function openWacDispoModal(itemCol, lot, wafer, records) {
+  document.getElementById("wacModalTitle").textContent =
+    `${normLot(lot)} #${normWafer(wafer)} · ${itemCol} · ${records.length}건`;
+  const body = document.getElementById("wacModalBody");
+  body.innerHTML = "";
+  for (const r of records) {
+    const box = el("div", { class: "dispo-event" });
+    const head = el("div", { class: "dispo-head" });
+    head.appendChild(el("b", { text: `${r.lot_id} · rw_cnt ${normRwCnt(r.rw_cnt)}` }));
+    head.appendChild(el("span", { text: formatDisplayTime(r.hold_time) }));
+    box.appendChild(head);
+    if (r.hold_inform) {
+      box.appendChild(el("div", { class: "dispo-inform", text: String(r.hold_inform) }));
+    }
+    for (const f of ["comment", "owner", "code"]) {
+      const row = el("div", { class: "dispo-row" });
+      row.appendChild(el("span", { class: "dispo-label", text: f }));
+      const v = r[f];
+      row.appendChild(el("span", {
+        text: v === null || v === undefined || String(v).trim() === "" ? "-" : String(v),
+      }));
+      box.appendChild(row);
+    }
+    body.appendChild(box);
+  }
+  if (records.length > 1) {
+    body.appendChild(el("div", { class: "modal-note",
+      text: "같은 wafer 가 재측정으로 여러 번 걸렸습니다. 건마다 조치가 따로 붙습니다." }));
   }
   document.getElementById("wacModal").hidden = false;
 }

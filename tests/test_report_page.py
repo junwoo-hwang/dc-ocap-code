@@ -123,6 +123,26 @@ def wac_page(report):
         browser.close()
 
 
+@pytest.fixture(autouse=True)
+def _reset(wac_page):
+    """페이지 하나를 여러 테스트가 나눠 쓰므로, 매번 같은 자리에서 시작한다.
+
+    (제품을 바꾸거나 검색을 걸어둔 채로 끝나면 다음 테스트가 다른 화면을
+    본다 -- 실제로 그래서 엉뚱한 테스트가 깨졌다.)
+    """
+    page, _planted, _traces, _errors = wac_page
+    page.evaluate("""() => {
+      closeWacModal();
+      state.product = 'ULY';
+      state.wacSelected = null;
+      document.getElementById('wacSearch').value = '';
+      state.wacSearch = '';
+      renderAll();
+    }""")
+    page.wait_for_timeout(1500)
+    yield
+
+
 def test_page_loads_without_console_errors(wac_page):
     _page, _planted, _traces, errors = wac_page
     assert errors == []
@@ -159,6 +179,157 @@ def test_exact_zeros_survive_on_an_item_centred_on_zero(wac_page):
     assert data, f"{planted['item_b']} 차트를 못 찾았습니다"
     zeros = sum(1 for ys in data.values() for y in ys if y == 0.0)
     assert zeros == N_ZEROS, f"0 이 {N_ZEROS}개여야 하는데 {zeros}개"
+
+
+def _hover(page, kind):
+    """조치 내역이 있는(kind="dispo") / 없는(kind="none") CL·SL 타점에 hover.
+
+    타점의 화면 좌표와 hover 상자의 사각형을 같이 돌려준다.
+    """
+    return page.evaluate(
+        """(kind) => {
+          for (const g of document.querySelectorAll('.wac-chart div.js-plotly-plot')) {
+            for (let ti = 0; ti < (g.data||[]).length; ti++) {
+              const t = g.data[ti];
+              if (t.name !== 'CL OUT' && t.name !== 'SL OUT') continue;
+              const want = (cd) => {
+                const s = cd[7] || '';
+                if (kind === 'dispo') return s.includes('클릭하면');
+                if (kind === 'none') return s.includes('hold 이력 없음');
+                // 'dash': hold 기록은 있는데 comment 도 owner 도 비어 있는 줄
+                return !s.includes('hold 이력 없음')
+                       && /comment : -(<br>|$)/.test(s) && s.includes('owner : -');
+              };
+              const i = (t.customdata||[]).findIndex(want);
+              if (i < 0) continue;
+              Plotly.Fx.hover(g, [{curveNumber: ti, pointNumber: i}]);
+              const lab = g.querySelector('.hoverlayer .hovertext');
+              const lb = lab ? lab.getBoundingClientRect() : null;
+              const fl = g._fullLayout;
+              const bb = g.querySelector('.main-svg').getBoundingClientRect();
+              const px = bb.left + fl.xaxis._offset + fl.xaxis.l2p(fl.xaxis.d2c(t.x[i]));
+              const py = bb.top + fl.yaxis._offset + fl.yaxis.l2p(fl.yaxis.d2c(t.y[i]));
+              g.dataset.hoverTarget = '1';
+              return { text: t.customdata[i][7], cd: t.customdata[i].slice(0, 2),
+                       item: g.parentElement.querySelector('.wac-chart-title').textContent.trim(),
+                       ti, pi: i, point: [px, py],
+                       box: lb ? [lb.left, lb.top, lb.right, lb.bottom] : null };
+            }
+          }
+          return null;
+        }""", kind)
+
+
+def _click_hovered(page, hit):
+    """_hover 가 짚은 바로 그 타점을 클릭한다.
+
+    (lot, wafer) 로만 찾으면 같은 wafer 가 모든 item 차트에 있어서 엉뚱한
+    차트의 타점을 누르게 된다 -- 실제로 그래서 이 테스트가 결함을 놓쳤다.
+    """
+    ok = page.evaluate(
+        """([ti, pi]) => {
+          const g = document.querySelector('.wac-chart div.js-plotly-plot[data-hover-target]');
+          if (!g) return false;
+          g.emit('plotly_click', {points: [{customdata: g.data[ti].customdata[pi]}]});
+          return true;
+        }""", [hit["ti"], hit["pi"]])
+    assert ok, "hover 했던 차트를 다시 못 찾았습니다"
+    page.wait_for_timeout(400)
+
+
+def test_the_hover_box_never_covers_the_point_it_describes(wac_page):
+    """가운데 타점은 상자가 놓일 자리가 좁아, 예전에는 상자가 타점을 덮었다."""
+    page, _planted, _traces, _errors = wac_page
+    page.fill("#wacSearch", "")
+    page.wait_for_timeout(2000)
+    hit = _hover(page, "dispo") or _hover(page, "none")
+    assert hit and hit["box"], "CL/SL 타점을 못 찾았습니다"
+    (px, py), (l, t, r, b) = hit["point"], hit["box"]
+    covered = l - 2 <= px <= r + 2 and t - 2 <= py <= b + 2
+    assert not covered, f"hover 상자 {hit['box']} 가 타점 {hit['point']} 을 덮습니다"
+
+
+def test_the_hover_comment_is_clipped_to_the_owner_line(wac_page):
+    """comment 는 길다. 상자가 커지면 놓을 자리가 없어 타점을 덮으므로,
+    owner / code 줄의 폭에서 자르고 전문은 팝업으로 보낸다."""
+    page, _planted, _traces, _errors = wac_page
+    hit = _hover(page, "dispo")
+    if not hit:
+        pytest.skip("조치 내역이 있는 CL/SL 타점이 mock 에 없다")
+    lines = [l for l in hit["text"].split("<br>") if not l.startswith("<i>")]
+    width = page.evaluate("(s) => displayWidth(s)", lines[0])
+    cap = max(page.evaluate("(s) => displayWidth(s)", l) for l in lines[1:])
+    assert width <= max(cap, 24), f"comment 줄이 {width} 칸, 기준 {cap} 칸"
+    assert "클릭하면" in hit["text"], "전문을 어디서 보는지 안내가 없다"
+
+
+def test_clicking_a_point_with_a_disposition_opens_the_full_text(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    page.evaluate("() => closeWacModal()")
+    hit = _hover(page, "dispo")
+    if not hit:
+        pytest.skip("조치 내역이 있는 CL/SL 타점이 mock 에 없다")
+    _click_hovered(page, hit)
+    assert not page.evaluate("() => document.getElementById('wacModal').hidden")
+    body = page.inner_text("#wacModalBody")
+    assert "comment" in body and "owner" in body and "code" in body
+    assert "…" not in body, "팝업에서는 자르지 않는다"
+    # 팝업을 닫아도 그 wafer 는 선택된 채로 남는다 (원래 클릭 동작)
+    page.evaluate("() => closeWacModal()")
+    assert page.inner_text("#wacSelected").strip() != ""
+
+
+@pytest.mark.parametrize("kind,why", [
+    ("none", "hold 기록 자체가 없는 타점"),
+    ("dash", "hold 기록은 있지만 comment 도 owner 도 비어 있는 타점"),
+])
+def test_clicking_a_point_with_no_disposition_just_selects_it(wac_page, kind, why):
+    """comment 도 owner 도 없으면 보여줄 게 없으므로 팝업을 띄우지 않는다.
+
+    두 경우를 다 본다. 'hold 기록이 없다' 와 '기록은 있는데 비어 있다' 는
+    다른 상태이고, 뒤쪽만 빠뜨리면 '기록이 있으면 무조건 띄운다' 로 바꿔도
+    아무 테스트도 안 깨진다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    page.evaluate("() => { closeWacModal(); state.wacSelected = null; wacApplySelection(); }")
+    hit = _hover(page, kind)
+    if not hit:
+        pytest.skip(f"{why} 이 mock 에 없다")
+    _click_hovered(page, hit)
+    assert page.evaluate("() => document.getElementById('wacModal').hidden"), "팝업이 뜨면 안 된다"
+    assert page.inner_text("#wacSelected").strip() != "", "선택은 되어야 한다"
+
+
+def test_a_retested_wafer_shows_every_hold_event(wac_page):
+    """같은 wafer 가 재측정으로 rw_cnt 0, 1 로 두 번 걸리면 둘 다 보여준다.
+
+    건마다 조치가 따로 붙으므로 합치면 한쪽 기록이 사라진다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    found = page.evaluate(
+        """() => {
+          for (const product of ['ULY', 'TTS', 'SOL']) {
+            const seen = {};
+            for (const r of (DATA.dc[product] || [])) {
+              const k = [normLot(r.root_lot_id), normWafer(r.wafer_id),
+                         String(r.item_id).trim().toLowerCase()].join('|');
+              (seen[k] = seen[k] || new Set()).add(normRwCnt(r.rw_cnt));
+            }
+            const k = Object.keys(seen).find(k => seen[k].size > 1);
+            if (!k) continue;
+            const [lot, wafer, item] = k.split('|');
+            state.product = product;
+            const records = wacHoldRecords(product, item, lot, wafer);
+            openWacDispoModal(item, lot, wafer, records);
+            return { n: records.length, rw: records.map(r => normRwCnt(r.rw_cnt)) };
+          }
+          return null;
+        }""")
+    if not found:
+        pytest.skip("재측정으로 두 번 걸린 wafer 가 mock 에 없다")
+    assert found["n"] >= 2 and len(set(found["rw"])) >= 2, found
+    assert page.eval_on_selector_all(".dispo-event", "d => d.length") == found["n"]
+    page.evaluate("() => closeWacModal()")
 
 
 def test_only_the_background_is_thinned(wac_page):
