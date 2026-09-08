@@ -3,7 +3,6 @@
 여기서 잡으려는 것은 '조용히 틀리는' 부류다 -- 오류 없이 빈 화면이나
 빠진 타점으로 나타나서, 데이터를 아는 사람만 알아챌 수 있는 것들.
 """
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -164,17 +163,6 @@ def test_group_holds_keeps_a_rework_separate(frames):
     if not reworked.empty:
         lot = reworked.iloc[0]["lot_id"]
         assert (grouped["lot_id"] == lot).sum() >= 2
-
-
-def test_limits_asof_uses_the_revision_live_at_that_moment(frames):
-    """규격이 바뀐 날 앞뒤로 다른 값이 나와야 한다 (차트의 계단)."""
-    spec_rows = app.item_spec_rows(frames[2]["ULY"], "item1")
-    if len(spec_rows) < 2:
-        pytest.skip("이 item 은 개정 이력이 하나뿐")
-    change = spec_rows["from_time"].iloc[1]
-    times = pd.Series([change - pd.Timedelta(days=1), change + pd.Timedelta(days=1)])
-    lim = app.limits_asof(spec_rows, times)
-    assert lim["ucl"].iloc[0] != lim["ucl"].iloc[1]
 
 
 # --------------------------------------------------------------- 빌드

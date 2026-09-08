@@ -1,9 +1,10 @@
 # 버전을 고정한다. 이 리포트는 한 시간마다 자동으로 다시 만들어져 올라가는데,
 # 범위로 두면 어느 날 갑자기 올라온 새 버전 때문에 아무도 안 건드린 코드가
-# 조용히 깨진다 (pandas 3 의 copy-on-write, plotly 6 의 trace 인자 변경처럼
-# 실제로 동작이 달라진 전례가 있다).
+# 조용히 깨진다 (pandas 3 의 copy-on-write 처럼 실제로 동작이 달라진 전례가 있다).
 # 올릴 때는 손으로 올리고 tests/ 를 돌려서 확인한다.
-streamlit==1.61.1
+#
+# plotly 는 차트를 그리는 데 쓰는 게 아니라, plotly.js 통째로를 리포트 안에
+# 넣기 위해 쓴다 (pyo.offline.get_plotlyjs). 차트는 브라우저가 그린다.
 pandas==3.0.5
 numpy==2.4.6
 plotly==6.9.0

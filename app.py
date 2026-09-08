@@ -1,34 +1,35 @@
-"""OCAP hold dashboard.
+"""DC OCAP 정적 리포트를 만든다 (dc_ocap.html).
 
-Left: the selected product's hold list (uly_dc / sol_dc / tts_dc),
-grouped to one row per lot_id, newest first, single-row selectable,
-with a ULY/SOL/TTS switch.
-Right (top 2/3): scatter of one measurement item across that product's
-trend dataframe (uly_trend / sol_trend / tts_trend), with UCL/LCL
-(blue) and USL/LSL (red) reference lines. Every wafer held for that
-item is red under a single legend entry; with no legend field chosen,
-other wafers from the same lot are a darker gray than the rest. The
-arrows step through the lot's items one at a time.
-Right (bottom 1/3): the disposition recorded in the company system and
-merged into dc -- comment, then owner and code -- shown read-only.
+사내 시스템에서 데이터를 뽑아 dc_ocap_template.html 에 밀어넣고, 파이썬이
+없어도 열리는 파일 하나로 내보낸다. 스케줄러가 한 시간마다 이 파일을
+실행하고, 나온 dc_ocap.html 을 포털이 보는 자리(S3)에 올린다.
+
+    python app.py          -> dc_ocap.html 생성
+    python diagnose.py     -> 데이터가 왜 안 보이는지 단계별 진단
+
+화면 동작(목록, 차트, 통계, EINECN 팝업)은 전부 dc_ocap_template.html 안의
+자바스크립트에 있다. 여기 파이썬이 하는 일은 '무엇을 넘길지' 까지다.
 
 ======================================================================
-DATA PREP (mock — stands in for the real pull, which can't be shared
-here). Replace this whole section with the real company-system pull;
-it only has to end up with pull_data() returning these twelve dataframes,
-in this order: uly_dc / sol_dc / tts_dc, uly_trend / sol_trend /
-tts_trend, uly_spec / sol_spec / tts_spec, uly_split / sol_split /
-tts_split. The order is the contract -- the dashboard reads them by
-position, not by name.
+DATA PREP (mock — 사내 조회를 대신하는 가짜 데이터. 실제 쿼리는 여기 올릴
+수 없어서 형태만 같게 만들어 둔 것이다.)
 
-Keep the pull inside pull_data() rather than at module level: Streamlit
-re-runs this file top to bottom on every click, so module-level code
-would re-query on every row selection. The dashboard calls it through
-@st.cache_data.
+이 구역을 통째로 사내 조회로 갈아끼우면 된다. 조건은 하나, pull_data() 가
+아래 열두 개를 이 순서로 돌려주는 것:
 
-This section deliberately uses no streamlit -- everything from the
-"여기부터 streamlit" marker down is self-contained (its own imports
-included), so replacing this section can't break the dashboard.
+    uly_dc    / sol_dc    / tts_dc
+    uly_trend / sol_trend / tts_trend
+    uly_spec  / sol_spec  / tts_spec
+    uly_split / sol_split / tts_split
+
+순서가 곧 계약이다 -- 이름이 아니라 위치로 읽는다. 순서를 틀리면 오류 없이
+다른 제품 데이터가 다른 제품 이름표를 달고 나온다.
+
+조회는 반드시 pull_data() 안에 둔다. 모듈 수준에 두면 이 파일을 import
+하는 것만으로 사내 시스템을 때리게 된다.
+
+이 구역은 아래쪽에 기대지 않는다 (자기 import 만 쓴다). 그래서 통째로
+갈아끼워도 리포트 쪽이 깨지지 않는다.
 ======================================================================
 """
 
@@ -514,10 +515,8 @@ def pull_data():
     returning them as written would quietly label one product's splits
     with another's name.
 
-    Put the real company-system pull in here. It must be a function, not
-    bare module-level code: Streamlit re-runs this file top to bottom on
-    every click, so anything at module level would be re-fetched on every
-    row selection. The dashboard below calls this through a cache.
+    사내 조회는 반드시 이 함수 안에 둔다. 모듈 수준에 두면 이 파일을
+    import 하는 것만으로 사내 시스템을 때린다.
     """
     uly_trend = generate_probe_df("ULY")
     sol_trend = generate_probe_df("SOL")
@@ -542,7 +541,7 @@ def pull_data():
 
 
 # ======================================================================
-# 여기부터 streamlit
+# 여기부터 리포트 (위 구역을 갈아끼워도 이 아래는 그대로 쓴다)
 # ======================================================================
 
 # imported here rather than at the top of the file so this section keeps
@@ -556,18 +555,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.offline as pyo
-import streamlit as st
 
 # KST is pinned at UTC+9 rather than read from the host clock, so the
 # header timestamp stays correct wherever the app is deployed.
 KST = timezone(timedelta(hours=9))
-
-# st.session_state is one flat namespace shared by every page the portal
-# renders, so every key this page touches is prefixed -- otherwise a
-# generic name like "status_filter" could collide with another page's key
-KEY_PREFIX = "dc_ocap_"
 
 # columns the dashboard below reads; anything missing would otherwise
 # surface as a KeyError deep in a callback
@@ -586,11 +578,6 @@ TREND_REQUIRED = [
 # hold or 이력 (see filter_by_status), but a flowed lot turns into ship a
 # few days later, so as a displayed value it just goes stale.
 GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
-
-# hold 를 실제로 푸는 사내 사이트. go/dcocap 은 사내 단축주소라서 반드시
-# 스킴을 붙여야 한다 -- href="go/dcocap" 은 현재 페이지 기준 상대경로로
-# 해석되어 포털 안쪽 주소로 새고, 주소창에 칠 때처럼 호스트로 풀리지 않는다.
-DC_HOLD_URL = "https://go/dcocap"
 
 
 # Limits live in trend next to the measurement, as item1_ucl / item1_usl /
@@ -665,43 +652,8 @@ def shared_constants_js() -> str:
     }, ensure_ascii=False, separators=(",", ":")) + ";"
 
 
-def robust_bounds(values) -> tuple[float, float] | None:
-    """이상값을 가르는 [lo, hi]. 못 정하겠으면 None (= 아무것도 안 거른다).
-
-    median + MAD x 1.4826 으로 표준편차와 같은 눈금을 만든다. 값의 절반
-    이상이 똑같아 MAD 가 0 이면 사분위로 다시 재고, 그래도 0 이면 사실상
-    값이 하나뿐이라 거를 것이 없다.
-    """
-    v = pd.Series(values, dtype="float64").dropna()
-    if len(v) < OUTLIER_MIN_N:
-        return None
-    med = float(v.median())
-    scale = 1.4826 * float((v - med).abs().median())
-    if not scale > 0:
-        q1, q3 = float(v.quantile(0.25)), float(v.quantile(0.75))
-        scale = (q3 - q1) / 1.349
-    if not scale > 0:
-        return None
-    return med - OUTLIER_K * scale, med + OUTLIER_K * scale
 
 
-def is_absurd(values, bounds, lim: dict | None, held) -> pd.Series:
-    """숨길 값인가. values 와 같은 index 의 boolean Series 를 돌려준다.
-
-    hold 로 잡힌 wafer 는 절대 숨기지 않는다 -- hold 가 걸린 이유가 바로 그
-    극단값인 경우가 많아서, 숨기면 왜 걸렸는지가 사라진다. 규격 안에 있는
-    값도 숨기지 않는다: 아무리 median 에서 멀어도 규격을 지킨 값을
-    '어이없다' 고 할 수는 없다.
-    """
-    v = pd.Series(values, dtype="float64")
-    if bounds is None:
-        return pd.Series(False, index=v.index)
-    lo, hi = bounds
-    out = (v < lo) | (v > hi)
-    if lim is not None and "lsl" in lim and "usl" in lim:
-        in_spec = (v >= lim["lsl"]) & (v <= lim["usl"])
-        out &= ~in_spec.fillna(False)
-    return out & ~pd.Series(held, index=v.index).fillna(False).astype(bool)
 
 
 def item_columns(trend_df) -> list:
@@ -709,53 +661,8 @@ def item_columns(trend_df) -> list:
     return [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
 
 
-def item_spec_rows(spec_df, item_id) -> pd.DataFrame:
-    """One item's revisions, oldest first, with the limits coerced to float."""
-    empty = pd.DataFrame(columns=SPEC_REQUIRED)
-    if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
-        return empty
-    if "item_id" not in spec_df.columns or "from_time" not in spec_df.columns:
-        return empty
-    key = str(item_id).strip().lower()
-    rows = spec_df[spec_df["item_id"].astype(str).str.strip().str.lower() == key].copy()
-    if rows.empty:
-        return rows
-    rows["from_time"] = pd.to_datetime(rows["from_time"], errors="coerce")
-    for w in LIMIT_COLS:
-        rows[w] = pd.to_numeric(rows[w], errors="coerce") if w in rows.columns else np.nan
-    # 관리선 값까지 포함해 정렬한다. 같은 item 이 같은 from_time 에 두 벌
-    # 들어오는 일이 실제로 있는데(뽑는 쿼리에 조건이 하나 모자란 경우),
-    # from_time 만으로 정렬하면 '나중 행' 이 원본 행 순서에 따라 달라져서
-    # 같은 데이터인데 조회할 때마다 관리선이 달라 보인다. 두 벌 중 어느
-    # 쪽이 맞는지는 여기서 알 수 없으므로 고르지는 않고, 적어도 항상 같은
-    # 쪽이 고르도록만 해 둔다 (진짜 원인은 diagnose.py 7번이 짚어준다).
-    return (rows.dropna(subset=["from_time"])
-            .sort_values(["from_time", *LIMIT_COLS], na_position="first"))
 
 
-def limits_asof(spec_rows: pd.DataFrame, times) -> dict:
-    """Limits in force at each of `times` -> {which: Series aligned to times}.
-
-    merge_asof(direction="backward") is exactly "which revision was live
-    when this was measured": the newest revision at or before each
-    measurement, and NaN for anything measured before the first one.
-    """
-    idx = getattr(times, "index", None)
-    t = pd.Series(pd.to_datetime(pd.Series(times).values, errors="coerce"))
-    if spec_rows.empty:
-        out = {w: pd.Series(np.nan, index=t.index, dtype="float64") for w in LIMIT_COLS}
-    else:
-        left = pd.DataFrame({"_t": t}).reset_index()
-        merged = (pd.merge_asof(left.sort_values("_t"),
-                                spec_rows[["from_time", *LIMIT_COLS]],
-                                left_on="_t", right_on="from_time",
-                                direction="backward")
-                  .set_index("index").reindex(t.index))
-        out = {w: merged[w].astype("float64") for w in LIMIT_COLS}
-    if idx is not None:
-        for w in out:
-            out[w].index = idx
-    return out
 
 
 def sort_wafers(values) -> list:
@@ -778,26 +685,6 @@ def summarize(values) -> str:
     return seen[0] if len(seen) == 1 else f"{seen[0]}외 {len(seen) - 1}건"
 
 
-def format_disposition(rows: pd.DataFrame) -> tuple[str, str, str] | None:
-    """Distinct (comment, owner, code) text from dc rows, or None.
-
-    None means "there is nothing real to show": no row matched at all, or
-    every row's comment and owner are both blank/NaN. The company system
-    merge can leave either blank on a genuine record, so a comment with no
-    owner (or vice versa) still counts as history and is shown as-is.
-    """
-    if rows.empty:
-        return None
-    comments = [str(c).strip() for c in rows["comment"] if pd.notna(c) and str(c).strip()]
-    owners = [str(o).strip() for o in rows["owner"] if pd.notna(o) and str(o).strip()]
-    if not comments and not owners:
-        return None
-    codes = [str(c).strip() for c in rows["code"] if pd.notna(c) and str(c).strip()]
-    return (
-        "\n".join(dict.fromkeys(comments)) if comments else "-",
-        " / ".join(dict.fromkeys(owners)) if owners else "-",
-        " / ".join(dict.fromkeys(codes)) if codes else "-",
-    )
 
 
 def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
@@ -830,17 +717,6 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
     return dc_df[undispositioned] if view == "hold" else dc_df[~undispositioned]
 
 
-def count_new_holds(dc_df: pd.DataFrame) -> int:
-    """How many rows the list shows under the "hold" filter.
-
-    Deliberately runs the list's own filter and grouping rather than
-    re-deriving anything here, so the header count can never drift from
-    the rows underneath it -- including after grouping changed from
-    lot_id alone to (lot_id, rw_cnt).
-    """
-    if dc_df.empty or "lot_id" not in dc_df.columns:
-        return 0
-    return len(group_holds(filter_by_status(dc_df, "hold")))
 
 
 def group_holds(dc_df: pd.DataFrame) -> pd.DataFrame:
@@ -964,19 +840,6 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _held_pairs(dc_df, item_col) -> set:
-    """그 item 으로 hold 가 걸린 (root_lot_id, wafer_id) 쌍.
-
-    이상값을 거를 때 예외로 둘 대상을 고르는 데 쓴다. dc 의 item_id 와
-    trend 의 컬럼 이름은 대소문자/공백이 다를 수 있어 양쪽을 맞춰 본다.
-    """
-    if not isinstance(dc_df, pd.DataFrame) or dc_df.empty:
-        return set()
-    if not {"item_id", "root_lot_id", "wafer_id"} <= set(dc_df.columns):
-        return set()
-    want = str(item_col).strip().lower()
-    rows = dc_df[dc_df["item_id"].map(lambda v: str(v).strip().lower() == want)]
-    return set(zip(rows["root_lot_id"].map(norm_lot), rows["wafer_id"].map(norm_wafer)))
 
 
 def check_data(product_dc: dict, trend_frames: dict,
@@ -1190,1117 +1053,26 @@ def frames_by_product(frames) -> tuple[dict, dict, dict, dict]:
             {"ULY": uly_split, "TTS": tts_split, "SOL": sol_split})
 
 
-# Streamlit re-runs show_dc_ocap() on every click (the portal reruns its
-# whole script top to bottom, same as any Streamlit app), so pull_data()
-# is called through a cache -- otherwise every row selection would
-# re-query the company system. ttl is how stale the data may get before
-# the next interaction refetches it; raise or lower it to taste, and use
-# the app's ⋮ menu > Clear cache to force a refresh.
-@st.cache_data(ttl=600, show_spinner="데이터 불러오는 중...")
-def load_data():
-    frames = pull_data()
-    # checked here rather than on every rerun: it scans the whole trend
-    # tables, which is far too slow to repeat on each click
-    dc_frames, trend_frames, spec_frames, split_frames = frames_by_product(frames)
-    problems, warnings = check_data(dc_frames, trend_frames, spec_frames, split_frames)
-    # stamped inside the cache, so the header reports when the data was
-    # actually fetched rather than when the page was last re-rendered
-    loaded_at = datetime.now(KST).strftime("%y/%m/%d %H:%M")
-    return (*frames, loaded_at, problems, warnings)
 
 
-# "_hover_time" rather than "tkout_time" itself: the x-axis needs the real
-# datetime column, and a plain string reads better in the hover box than
-# whatever plotly would stringify a raw Timestamp to
-HOVER_COLS = ["root_lot_id", "wafer_id", "_hover_time", "probe_card_id", "eqp_id", "lot_type", "rw_cnt"]
-HOVER_TEMPLATE = (
-    "root_lot_id=%{customdata[0]}<br>"
-    "wafer_id=%{customdata[1]}<br>"
-    "tkout_time=%{customdata[2]}<br>"
-    "probe_card_id=%{customdata[3]}<br>"
-    "eqp_id=%{customdata[4]}<br>"
-    "lot_type=%{customdata[5]}<br>"
-    "rw_cnt=%{customdata[6]}<extra></extra>"
-)
 
-# red means "past the scrap limit" and blue "past the control limit", so
-# both hues -- and anything close enough to be mistaken for them at marker
-# size, like orange or light blue -- are kept out of this palette. 20
-# entries so a high-cardinality field (many probe cards / eqp ids in the
-# queried window) doesn't wrap onto a duplicate color too quickly.
-CATEGORY_COLORS = [
-    "#2ca02c", "#9467bd", "#8c564b", "#bcbd22", "#17becf",
-    "#e377c2", "#7f7f7f", "#1b9e77", "#a6761d", "#66a61e",
-    "#5d4037", "#8e6c8a", "#93a01e", "#4d4d4d", "#c49a6c",
-    "#7fbf7b", "#af8dc3", "#d9a441", "#2f6f4e", "#6b4f8a",
-]
 
 
-def find_trend_df(trend_frames: dict, product: str, item_id: str):
-    """Return (trend dataframe, its column for item_id), or (None, None).
 
-    The product is known from the hold list's own selection, so it is
-    used directly instead of searching every trend frame for a matching
-    root_lot_id -- a lot that appears under more than one product would
-    otherwise chart the wrong product's data. The column is resolved
-    rather than taken literally because dc and the trend tables can
-    capitalise item ids differently. trend_frames is passed in rather
-    than read off a module global, since that global only exists once
-    show_dc_ocap() has actually loaded the data for this run.
-    """
-    tdf = trend_frames.get(product)
-    if tdf is None or tdf.empty:
-        return None, None
-    item_col = resolve_item_col(tdf, item_id)
-    if item_col is None:
-        return None, None
-    return tdf, item_col
 
 
-LIMIT_LINE_STYLE = {
-    "ucl": ("blue", "UCL"), "lcl": ("blue", "LCL"),
-    "usl": ("red", "USL"),  "lsl": ("red", "LSL"),
-}
-
-
-def add_limit_steps(fig, spec_rows: pd.DataFrame, x_min, x_max) -> None:
-    """Draw each limit as a step line built from the spec revisions.
-
-    Taken from the revisions rather than the measurements, so the step
-    lands on the date the spec changed instead of on the first wafer
-    measured after it, the line spans the chart even across a gap in
-    measurements, and it costs two or three points instead of one per row.
-    """
-    if spec_rows.empty or pd.isna(x_min) or pd.isna(x_max):
-        return
-    for which in LIMIT_COLS:
-        xs, ys = [], []
-        for t, v in zip(spec_rows["from_time"], spec_rows[which]):
-            if pd.isna(v):
-                continue
-            if t <= x_min:
-                # 차트 시작 시점에 이미 적용 중이던 값 -- 왼쪽 끝에서 시작
-                xs, ys = [x_min], [v]
-            elif t <= x_max:
-                xs.append(t)
-                ys.append(v)
-        if not xs:
-            continue
-        xs.append(x_max)          # 마지막 값을 오른쪽 끝까지 끌고 간다
-        ys.append(ys[-1])
-        color, label = LIMIT_LINE_STYLE[which]
-        fig.add_trace(go.Scatter(
-            x=xs, y=ys, mode="lines", name=label,
-            # hv: hold the old value until the moment it changes, then step
-            line=dict(color=color, dash="dash", width=1, shape="hv"),
-            hoverinfo="skip", showlegend=False,
-        ))
-        fig.add_annotation(
-            xref="paper", x=0, xanchor="left", y=ys[0], yref="y", text=label,
-            showarrow=False, font=dict(color=color, size=11),
-            yanchor="bottom" if which in ("ucl", "usl") else "top",
-        )
-
-
-def build_scatter(trend_df, item_id: str, bad_pairs: set, bad_label: str,
-                   legend_field: str | None, spec_df,
-                   chart_height: int, focus_pair: tuple | None = None) -> go.Figure:
-    """Scatter one measurement item over time.
-
-    `bad_pairs` is the set of normalized (root_lot_id, wafer_id) pairs held
-    for this item -- a lot is held as a whole, so its wafers are
-    highlighted together rather than one legend entry each. Those held
-    wafers are then split by which limit they broke; `bad_label` is the
-    lot id the entries are named after.
-
-    `focus_pair`, if given, is the (root_lot_id, wafer_id) last clicked in
-    the chart -- it gets a black ring on top of its existing marker(s) and
-    its own legend entry, so the selection stays visible regardless of
-    which color group the point itself belongs to.
-    """
-    # coerce before dropna: a numeric column that came back as text/object
-    # (BigQuery NUMERIC/DECIMAL) would otherwise keep its non-null string
-    # values and only fail once plotly tries to lay out the chart
-    plot_df = trend_df.assign(**{item_id: pd.to_numeric(trend_df[item_id], errors="coerce")})
-    plot_df = plot_df.dropna(subset=[item_id])
-    # keep tkout_time itself as a real datetime (needed for the x-axis);
-    # format a separate string column just for the hover box
-    plot_df["_hover_time"] = plot_df["tkout_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    # limits come from the row, not from one number for the whole chart: the
-    # spec in force changes over time, so each point is judged against the
-    # one that applied when it was measured
-    spec_rows = item_spec_rows(spec_df, item_id)
-    lim = limits_asof(spec_rows, plot_df["tkout_time"])
-    # match on the pair (wafer numbers 1-25 repeat across lots), and
-    # normalize both sides: dc and the trend table need not agree on how
-    # a lot id is padded or whether the wafer number is text or an int
-    row_pairs = list(zip(plot_df["root_lot_id"].map(norm_lot),
-                         plot_df["wafer_id"].map(norm_wafer)))
-    is_bad_row = pd.Series([p in bad_pairs for p in row_pairs], index=plot_df.index)
-    bad_lots = {lot for lot, _ in bad_pairs}
-
-    # a point past the scrap limit is necessarily past the control limit
-    # too, so scrap wins and the two groups stay disjoint
-    values = plot_df[item_id]
-    past_scrap = (values > lim["usl"]).fillna(False) | (values < lim["lsl"]).fillna(False)
-    past_control = ((values > lim["ucl"]).fillna(False)
-                    | (values < lim["lcl"]).fillna(False))
-    past_control &= ~past_scrap
-
-    bad = plot_df[is_bad_row]
-    in_spec = ~(past_scrap | past_control)
-
-    # 어이없는 값은 배경에서만 뺀다. 이런 값 하나가 y축을 통째로 늘려서
-    # 정작 봐야 할 흐름이 한 줄로 눌려 버린다. hold 로 잡힌 wafer 는
-    # 예외다 -- hold 사유가 바로 그 값인 경우가 많다.
-    #
-    # '정확히 0 = 계측 실패' 로 보고 버리던 규칙이 여기 있었는데, 값이 0
-    # 근처인 item(누설 같은 것)에서는 멀쩡한 값을 소리 없이 지웠다. 진짜
-    # 계측 실패인 0 은 어차피 아래 5시그마 규칙에 걸린다.
-    bounds = robust_bounds(values[~is_bad_row])
-    absurd = is_absurd(values, bounds, lim, is_bad_row)
-    others = plot_df[~is_bad_row & ~absurd]
-
-    fig = go.Figure()
-
-    def add_group(grp: pd.DataFrame, color: str, name: str, rank: int, is_bad: bool = False) -> None:
-        if grp.empty:
-            return
-        # held wafers keep the bigger outlined marker so they stay findable;
-        # their fill says which limit the point broke
-        marker = (
-            dict(color=color, size=11, line=dict(width=1, color="black"))
-            if is_bad
-            else dict(color=color, size=7)
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=grp["tkout_time"], y=grp[item_id],
-                mode="markers", marker=marker,
-                name=name,
-                # the held wafer is added last so it draws on top, but ranks
-                # first in the legend: with many categories plotly clips the
-                # legend, and this entry must never be the one cut off
-                legendrank=rank,
-                customdata=grp[HOVER_COLS].values,
-                hovertemplate=HOVER_TEMPLATE,
-            )
-        )
-
-    if legend_field is None:
-        # other wafers from the held lot(s) are the most useful comparison,
-        # so they get a darker gray than the rest of the population
-        same_lot_mask = others["root_lot_id"].map(norm_lot).isin(bad_lots)
-        add_group(others[~same_lot_mask], "lightgray", "other", rank=1100)
-        add_group(others[same_lot_mask], "dimgray", ",".join(sorted(bad_lots)), rank=1050)
-    else:
-        # dropna=False: rows whose legend field is blank would otherwise be
-        # dropped from every group and silently vanish from the chart
-        for i, (cat_val, grp) in enumerate(others.groupby(legend_field, dropna=False)):
-            label = "(없음)" if pd.isna(cat_val) else str(cat_val)
-            add_group(grp, CATEGORY_COLORS[i % len(CATEGORY_COLORS)], label, rank=1000 + i)
-
-    # the held wafers are split by which limit they broke -- that judgement
-    # is what the engineer is here to make. Scrap outranks control in the
-    # legend, and a held wafer inside both limits (held on a trend rule or
-    # an equipment alarm) is drawn hollow rather than given a limit color.
-    # The entries are named by lot and wafer only: the marker color already
-    # says which limit, so spelling it out again just crowds the legend.
-    def add_bad(subset: pd.DataFrame, color: str, rank: int) -> None:
-        if subset.empty:
-            return
-        wafers = ",".join(str(w) for w in sort_wafers(subset["wafer_id"]))
-        add_group(subset, color, f"{bad_label} #{wafers}", rank=rank, is_bad=True)
-
-    add_bad(bad[past_scrap.loc[bad.index]], LIMIT_COLORS["scrap"], 1)
-    add_bad(bad[past_control.loc[bad.index]], LIMIT_COLORS["control"], 2)
-    add_bad(bad[in_spec.loc[bad.index]], "white", 3)
-
-    # ring around the last-clicked wafer, drawn last (so it's on top) and
-    # ranked first in the legend -- it doesn't replace the point's own
-    # color, just marks which one is currently focused
-    if focus_pair is not None:
-        froot, fwafer = focus_pair
-        focus_rows = plot_df[
-            plot_df["root_lot_id"].map(norm_lot).eq(norm_lot(froot))
-            & plot_df["wafer_id"].map(norm_wafer).eq(norm_wafer(fwafer))
-        ]
-        if not focus_rows.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=focus_rows["tkout_time"], y=focus_rows[item_id],
-                    mode="markers",
-                    marker=dict(color="rgba(0,0,0,0)", size=18, line=dict(width=3, color="black")),
-                    name=f"선택 WF: {norm_lot(froot)} #{norm_wafer(fwafer)}",
-                    legendrank=0,
-                    customdata=focus_rows[HOVER_COLS].values,
-                    hovertemplate=HOVER_TEMPLATE,
-                )
-            )
-
-    # skip any limit that didn't parse to a number rather than passing None
-    # through to plotly, which errors on a missing y just as it does on a str
-    add_limit_steps(fig, spec_rows,
-                    plot_df["tkout_time"].min(), plot_df["tkout_time"].max())
-
-    fig.update_layout(
-        xaxis_title="tkout_time",
-        yaxis_title=item_id,
-        legend_title=legend_field or "Legend",
-        # compact legend so a high-cardinality field still fits without
-        # plotly clipping entries off the bottom
-        legend=dict(font=dict(size=10), itemsizing="constant", tracegroupgap=0),
-        height=chart_height,
-        margin=dict(t=30, b=30),
-    )
-    return fig
-
-
-# ====================================================================
-# WAC Trend 페이지 -- 한 제품의 item 을 전부 작은 차트로 늘어놓고, 어느
-# 차트에서 타점을 누르든 그 wafer 가 모든 차트에서 같이 커진다.
-# 정적 리포트(dc_ocap_template.html)의 WAC 페이지와 같은 규칙/색/크기를
-# 쓴다 -- 값이 갈리면 두 화면이 다른 판정을 내리게 된다.
-# ====================================================================
-# 색/크기/솎는 기준은 위 '정적 리포트와 같아야 하는 값들' 에 있다
-WAC_CHART_HEIGHT = 260
-WAC_GRID_COLS = 2
-# grp 값 -> (범례 이름, 색, 범례 순서). 0=정상 1=CL OUT 2=SL OUT
-WAC_GROUPS = (
-    ("trend", WAC_GRAY, 1100),
-    ("CL OUT", LIMIT_COLORS["control"], 20),
-    ("SL OUT", LIMIT_COLORS["scrap"], 10),
-)
-
-
-@st.cache_data(show_spinner=False)
-def wac_item_points(product: str, item_col: str, stamp: str) -> dict:
-    """한 (제품, item) 의 타점을 그리기 좋은 배열로 미리 만들어 캐시한다.
-
-    타점을 한 번 누를 때마다 Streamlit 은 페이지를 통째로 다시 그린다.
-    item 이 30개면 그때마다 30번 * 수천 행을 다시 훑게 되므로, 판정(CL/SL)
-    과 hover 문자열까지 여기서 한 번만 만들어 둔다. 선택 표시는 이 배열 위의
-    boolean mask 라서 클릭할 때 다시 계산할 게 거의 없다.
-
-    stamp 는 load_data() 가 찍은 적재 시각이다. 데이터프레임을 인자로 받으면
-    Streamlit 이 캐시 키를 만들려고 매번 전체를 해시하는데, 그게 계산보다
-    비싸다. 대신 값싼 문자열을 키로 쓰고 프레임은 (이미 캐시된) load_data()
-    에서 가져온다 -- 데이터가 새로 적재되면 stamp 가 바뀌어 같이 무효화된다.
-    """
-    dc_frames, trend_frames, spec_frames, _split = frames_by_product(load_data())
-    trend_df, spec_df = trend_frames[product], spec_frames[product]
-
-    vals = pd.to_numeric(trend_df[item_col], errors="coerce")
-    keep = vals.notna()
-    d, v = trend_df[keep], vals[keep]
-    spec_rows = item_spec_rows(spec_df, item_col)
-    lim = limits_asof(spec_rows, d["tkout_time"])
-
-    # 어이없는 값은 빼고 그린다. 한 점이 y축을 통째로 늘려 놓으면 나머지가
-    # 한 줄로 눌려서 아무것도 안 보인다. hold 로 잡힌 wafer 는 남긴다 --
-    # hold 사유가 바로 그 값인 경우가 많다 (정적 리포트와 같은 규칙).
-    held_pairs = _held_pairs(dc_frames.get(product), item_col)
-    is_held = pd.Series(
-        [(lot, wf) in held_pairs
-         for lot, wf in zip(d["root_lot_id"].map(norm_lot), d["wafer_id"].map(norm_wafer))],
-        index=d.index,
-    )
-    bounds = robust_bounds(v[~is_held])
-    shown = ~is_absurd(v, bounds, lim, is_held)
-    d, v, is_held = d[shown], v[shown], is_held[shown]
-    lim = {k: s[shown] for k, s in lim.items()}
-
-    # 규격을 벗어난 점이 관리선도 벗어난 건 당연하므로, SL 이 이기고 둘은
-    # 서로 겹치지 않는다 (build_scatter 와 같은 규칙)
-    scrap = (v > lim["usl"]).fillna(False) | (v < lim["lsl"]).fillna(False)
-    control = ((v > lim["ucl"]).fillna(False)
-               | (v < lim["lcl"]).fillna(False)) & ~scrap
-    grp = np.where(scrap, 2, np.where(control, 1, 0)).astype(np.int8)
-
-    hover = d["tkout_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    cd = np.column_stack([
-        d["root_lot_id"].astype(str), d["wafer_id"].astype(str), hover,
-        d["probe_card_id"].astype(str), d["eqp_id"].astype(str),
-        d["lot_type"].astype(str), d["rw_cnt"].astype(str),
-    ])
-
-    gray = np.flatnonzero(grp == 0)
-    if WAC_MAX_GRAY and len(gray) > WAC_MAX_GRAY:
-        step = len(gray) / WAC_MAX_GRAY
-        pick = np.floor(np.arange(WAC_MAX_GRAY) * step).astype(int)
-        # 마지막 점은 따로 넣는다. floor 는 끝에 못 닿아서 그냥 두면 차트가
-        # 실제보다 일찍 끝난 것처럼 보인다 (정적 리포트도 같이 맞춰 뒀다)
-        if pick[-1] != len(gray) - 1:
-            pick = np.append(pick, len(gray) - 1)
-        gray = gray[pick]
-
-    x = d["tkout_time"].to_numpy()
-    return {
-        "x": x, "y": v.to_numpy(), "cd": cd, "grp": grp, "gray": gray,
-        "lot": d["root_lot_id"].map(norm_lot).to_numpy(),
-        "wafer": d["wafer_id"].map(norm_wafer).to_numpy(),
-        "spec_rows": spec_rows,
-        "x_min": x.min() if len(x) else None,
-        "x_max": x.max() if len(x) else None,
-    }
-
-
-def build_wac_scatter(pts: dict, item_col: str, selection: dict | None) -> go.Figure:
-    """WAC 그리드의 차트 하나. 선택된 wafer 는 모든 차트에서 같이 커진다."""
-    fig = go.Figure()
-    x, y, cd, grp = pts["x"], pts["y"], pts["cd"], pts["grp"]
-
-    for gi, (name, color, rank) in enumerate(WAC_GROUPS):
-        idx = pts["gray"] if gi == 0 else np.flatnonzero(grp == gi)
-        # 비어도 트레이스는 넣는다 -- 범례에 CL OUT / SL OUT 자리가 항상
-        # 있어야 "없는 것" 과 "안 그려진 것" 을 구분할 수 있다
-        fig.add_trace(go.Scatter(
-            x=x[idx], y=y[idx], mode="markers", name=name, legendrank=rank,
-            marker=dict(color=color, size=WAC_SIZE),
-            customdata=cd[idx], hovertemplate=HOVER_TEMPLATE,
-        ))
-
-    # 선택 표시는 바탕 위에 얹는 '덧그림' 두 개다. 선택이 없어도 빈 채로
-    # 넣어 트레이스 자리와 순서를 고정한다 -- 정적 리포트가 덧그림을 3, 4번
-    # 자리에 못 박아 두고 restyle 만 하는 것과 같은 구성이라, 한쪽을 고칠 때
-    # 다른 쪽에서 무엇을 고쳐야 하는지가 바로 보인다.
-    lot_gray = np.array([], dtype=int)
-    hit_idx = np.array([], dtype=int)
-    if selection:
-        same_lot = pts["lot"] == norm_lot(selection["root_lot_id"])
-        hit = same_lot & (pts["wafer"] == norm_wafer(selection["wafer_id"]))
-        # 같은 lot 은 회색 타점만 진하게. CL/SL 은 제 색을 잃으면 안 된다
-        lot_gray = np.flatnonzero(same_lot & ~hit & (grp == 0))
-        hit_idx = np.flatnonzero(hit)
-    # hoverinfo="skip" 은 이 트레이스의 클릭도 끈다 -- 덧그림을 눌러도
-    # 밑의 원래 타점이 잡히므로 클릭 처리가 한 곳으로 모인다
-    fig.add_trace(go.Scatter(
-        x=x[lot_gray], y=y[lot_gray], mode="markers",
-        marker=dict(color=WAC_SAME, size=WAC_SIZE),
-        showlegend=False, hoverinfo="skip",
-    ))
-    # 고른 타점: 커지되 색은 자기 그룹 색 그대로 -- CL/SL 인지 계속 보인다
-    fig.add_trace(go.Scatter(
-        x=x[hit_idx], y=y[hit_idx], mode="markers",
-        marker=dict(color=np.array([g[1] for g in WAC_GROUPS])[grp[hit_idx]],
-                    size=WAC_SIZE_SEL),
-        showlegend=False, hoverinfo="skip",
-    ))
-
-    add_limit_steps(fig, pts["spec_rows"], pts["x_min"], pts["x_max"])
-    fig.update_layout(
-        xaxis_title="tkout_time", yaxis_title=item_col,
-        legend=dict(font=dict(size=9), itemsizing="constant", tracegroupgap=0),
-        height=WAC_CHART_HEIGHT, margin=dict(t=24, b=34, l=52, r=12),
-        # 타점을 눌러 다시 그려도 확대/이동 상태는 그대로 둔다
-        uirevision=item_col,
-    )
-    return fig
-
-
-# 두 페이지의 h1 옆에 붙는 작은 회색 글씨. 0.42em 이라 h1 크기에 따라
-# 같이 줄고, streamlit 이 h1 을 몇 px 로 그리든 두 페이지가 같아 보인다.
-HEAD_META_STYLE = "font-size:0.42em; font-weight:400; color:#888; line-height:1.35;"
-PAGES = ["DC OCAP", "WAC Trend"]
-
-
-def clicked_customdata(chart_state):
-    """st.plotly_chart 위젯 상태 -> 눌린 타점의 customdata (없으면 None).
-
-    st.session_state[key] 로 미리 읽든, st.plotly_chart 가 돌려준 값을 쓰든
-    같은 물건이라 한 함수로 처리한다. 모양이 바뀌어도 죽지 않게 방어적으로
-    꺼낸다 -- 여기서 죽으면 화면 전체가 안 뜬다.
-    """
-    if not chart_state:
-        return None
-    selection = chart_state.get("selection") if hasattr(chart_state, "get") else None
-    points = selection.get("points") if hasattr(selection, "get") else None
-    if not points:
-        return None
-    first = points[0]
-    cd = first.get("customdata") if hasattr(first, "get") else None
-    return cd if cd else None
-
-
-def render_wac_page(product_dc: dict, trend_frames: dict, spec_frames: dict,
-                    data_loaded_at: str) -> None:
-    """제품 하나의 item 을 전부 작은 차트로 늘어놓는 화면.
-
-    타점을 누르면 그 wafer 가 모든 차트에서 같이 커지고, 같은 lot 의 회색
-    타점은 진한 회색이 된다. 정적 리포트의 WAC 페이지와 같은 화면이다.
-
-    정적 리포트는 스크롤에 맞춰 차트를 하나씩 그리지만(IntersectionObserver),
-    Streamlit 은 파이썬이 그린 그림을 통째로 넘기는 구조라 그럴 자리가 없다.
-    그래서 여기서는 한 번에 그릴 차트 수를 나눠서 넘긴다 -- 30개를 한꺼번에
-    넘기면 클릭 한 번에 수 MB 를 다시 실어보내게 된다.
-    """
-    products = list(product_dc.keys())
-    sel_key = f"{KEY_PREFIX}wac_selected"
-    counts = ", ".join(f"{p} : {len(item_columns(trend_frames[p]))}건" for p in products)
-    st.markdown(
-        f"# WAC Trend "
-        f"<span style='display:inline-block; vertical-align:bottom; {HEAD_META_STYLE}'>"
-        f"WAC item 수<br>{counts}</span>",
-        unsafe_allow_html=True,
-    )
-
-    left, right = st.columns([2, 3])
-    with left:
-        title_col, search_col = st.columns([1.3, 3.35])
-        with title_col:
-            st.markdown(
-                "<div style='font-size:1.15rem; font-weight:700; padding-top:0.3rem;'>"
-                "ITEM Trend</div>",
-                unsafe_allow_html=True,
-            )
-        with search_col:
-            search = st.text_input(
-                "item 검색", placeholder="item_id 검색 (예: item3)",
-                label_visibility="collapsed", key=f"{KEY_PREFIX}wac_search",
-            )
-        # DC OCAP 페이지와 같은 key 를 쓴다 -- 정적 리포트처럼 두 화면이
-        # 제품 선택을 공유해서, 페이지를 옮겨도 보던 제품이 그대로 남는다
-        product = st.segmented_control(
-            "제품", products, default=products[0], required=True,
-            label_visibility="collapsed", key=f"{KEY_PREFIX}product_switch",
-            width="stretch",
-        ) or products[0]
-    with right:
-        # DC HOLD LINK 는 이 페이지에 없다 -- hold 를 푸는 화면이 아니다
-        st.markdown(
-            f"<div style='text-align:right; font-size:0.8rem; color:#888;'>"
-            f"(Latest Data : {data_loaded_at})</div>",
-            unsafe_allow_html=True,
-        )
-
-    q = (search or "").strip().lower()
-    items = [c for c in item_columns(trend_frames[product])
-             if not q or q in str(c).lower()]
-    if not items:
-        st.info(f'"{search}" 와 맞는 item 이 없습니다.' if q
-                else "이 제품의 trend 에 item 컬럼이 없습니다.")
-        return
-
-    selection = st.session_state.get(sel_key)
-    # 선택은 제품을 넘어가면 뜻이 없다 (다른 제품엔 그 wafer 가 없다)
-    if selection and selection.get("product") != product:
-        selection = None
-        st.session_state[sel_key] = None
-
-    seen_key = f"{KEY_PREFIX}wac_seen"
-    nonce_key = f"{KEY_PREFIX}wac_nonce"
-    seen = st.session_state.setdefault(seen_key, {})
-    nonce = st.session_state.setdefault(nonce_key, 0)
-
-    # 선택 문구가 들어갈 자리를 먼저 잡아둔다. 클릭은 아래에서 차트를
-    # 그리기 직전에 읽는데, 그 결과를 여기 위에 써야 하기 때문이다.
-    msg_slot = st.container()
-
-    # 한 번에 그릴 차트 수. 클릭 한 번에 이만큼을 다시 그려 브라우저로
-    # 넘기므로, item 이 많은 제품에서 이걸 키우면 클릭이 그만큼 느려진다.
-    per_page = st.session_state.setdefault(f"{KEY_PREFIX}wac_per_page", 10)
-    n_pages = max(1, -(-len(items) // per_page))
-    page_idx = 0
-    if n_pages > 1:
-        nav_col, size_col, _sp = st.columns([2, 1.4, 4])
-        with nav_col:
-            page_idx = st.select_slider(
-                "차트 페이지",
-                options=list(range(n_pages)),
-                format_func=lambda i: f"{i * per_page + 1}~"
-                                      f"{min((i + 1) * per_page, len(items))} / {len(items)}",
-                key=f"{KEY_PREFIX}wac_page_idx_{product}_{q}_{per_page}",
-                label_visibility="collapsed",
-            )
-        with size_col:
-            new_size = st.selectbox(
-                "한 번에", [4, 10, 20, 50], index=[4, 10, 20, 50].index(per_page),
-                format_func=lambda n: f"{n}개씩", label_visibility="collapsed",
-                key=f"{KEY_PREFIX}wac_per_page_pick",
-            )
-            if new_size != per_page:
-                st.session_state[f"{KEY_PREFIX}wac_per_page"] = new_size
-                st.rerun()
-    shown = items[page_idx * per_page:(page_idx + 1) * per_page]
-    chart_keys = {c: f"{KEY_PREFIX}wac_chart_{product}_{c}_{nonce}" for c in shown}
-
-    # 차트를 그리기 '전에' 위젯 상태를 읽는다. st.plotly_chart 가 돌려주는
-    # 값은 st.session_state[key] 와 같은 것이라, 그리는 도중에 확인하면
-    # 앞쪽 차트는 이미 옛 선택으로 그려진 뒤라서 st.rerun() 으로 한 바퀴를
-    # 더 돌아야 한다. 먼저 읽으면 클릭 한 번에 페이지를 두 번 그리던 것이
-    # 한 번으로 준다 (차트가 10개면 그림 10장을 덜 만들어 덜 보낸다).
-    #
-    # '어느 차트가 방금 눌린 것인가' 는 상태만 봐서는 알 수 없다 -- 눌렸던
-    # 차트는 그 뒤로도 계속 같은 점을 보고하기 때문이다. 그래서 차트마다
-    # 마지막으로 본 값을 seen 에 적어두고, 그것과 달라진 차트만 새 클릭으로
-    # 친다.
-    for item_col in shown:
-        key = chart_keys[item_col]
-        cd = clicked_customdata(st.session_state.get(key))
-        pair = (cd[0], cd[1]) if cd else None
-        if seen.get(key) != pair:
-            seen[key] = pair
-            if pair is not None:
-                selection = {"product": product,
-                             "root_lot_id": pair[0], "wafer_id": pair[1]}
-                st.session_state[sel_key] = selection
-
-    with msg_slot:
-        msg_col, clear_col = st.columns([6, 1])
-        with msg_col:
-            if selection:
-                st.markdown(
-                    f"<div style='font-size:0.85rem; color:#d33; font-weight:600;'>"
-                    f"선택한 wafer : {norm_lot(selection['root_lot_id'])} "
-                    f"#{norm_wafer(selection['wafer_id'])}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.caption("타점을 누르면 그 wafer 가 모든 차트에서 같이 커집니다.")
-        with clear_col:
-            # 정적 리포트는 같은 타점을 다시 눌러 해제하지만, Streamlit 은
-            # 같은 점을 다시 눌러도 위젯 값이 그대로라 아무 일도 일어나지
-            # 않는다. 그래서 해제는 버튼으로 둔다. nonce 를 올려 차트 key 를
-            # 통째로 바꾸는 이유는, 안 그러면 차트들이 방금 해제한 선택을
-            # 계속 들고 있어서 같은 타점을 다시 눌러도 '바뀐 게 없다' 가
-            # 되기 때문이다.
-            if selection and st.button("선택 해제", key=f"{KEY_PREFIX}wac_clear",
-                                       width="stretch"):
-                st.session_state[sel_key] = None
-                st.session_state[nonce_key] = nonce + 1
-                st.session_state[seen_key] = {}
-                st.rerun()
-
-    stamp = data_loaded_at
-    for row_start in range(0, len(shown), WAC_GRID_COLS):
-        cols = st.columns(WAC_GRID_COLS)
-        for col, item_col in zip(cols, shown[row_start:row_start + WAC_GRID_COLS]):
-            with col, st.container(border=True):
-                st.markdown(
-                    f"<div style='font-weight:700; font-size:0.95rem;'>{item_col}</div>",
-                    unsafe_allow_html=True,
-                )
-                pts = wac_item_points(product, item_col, stamp)
-                if pts["spec_rows"].empty:
-                    # 관리선이 없으면 OUT 판정을 할 수 없어 전부 회색이 된다.
-                    # 그 사실을 안 적어두면 "이 item 은 다 정상" 으로 읽힌다.
-                    st.markdown(
-                        f"<div style='font-size:0.75rem; color:#b45309;'>"
-                        f"관리선 없음 (spec 에 {item_col} 이 없습니다)</div>",
-                        unsafe_allow_html=True,
-                    )
-                key = chart_keys[item_col]
-                event = st.plotly_chart(
-                    build_wac_scatter(pts, item_col, selection),
-                    width="stretch", on_select="rerun", selection_mode="points",
-                    key=key,
-                )
-                # 보통은 위에서 미리 읽어 이미 반영돼 있다. 여기는 그게
-                # 빗나갔을 때를 위한 그물이다 (streamlit 이 위젯 상태를
-                # 담는 모양을 바꾸면 위쪽 사전 확인이 조용히 아무것도 못
-                # 찾게 되는데, 그러면 클릭이 통째로 안 먹는다).
-                cd = clicked_customdata(event)
-                if cd:
-                    pair = (cd[0], cd[1])
-                    if seen.get(key) != pair:
-                        seen[key] = pair
-                        st.session_state[sel_key] = {
-                            "product": product,
-                            "root_lot_id": pair[0], "wafer_id": pair[1],
-                        }
-                        # 이미 그린 차트들은 옛 선택으로 그려져 있다. 여기서
-                        # 다시 돌려야 모든 차트에 한꺼번에 반영된다.
-                        st.rerun()
-
-
-# ====================================================================
-# 🖥️ Streamlit 메인 화면 UI 구성 (DC OCAP List + Item Trend)
-# ====================================================================
-def show_dc_ocap():
-    """Render the DC OCAP hold dashboard as a portal page.
-
-    Left: the selected product's hold list, grouped to one row per
-    lot_id, newest first, single-row selectable, with a ULY/TTS/SOL
-    switch and a 전체/hold/이력 status filter.
-    Right (top 2/3): scatter of one measurement item across that
-    product's trend dataframe, with UCL/LCL (blue) and USL/LSL (red)
-    reference lines; clicking a wafer point rings it, adds it to the
-    legend, and switches the left list to that wafer's own lot.
-    Right (bottom 1/3): the disposition recorded in the company system
-    and merged into dc -- comment, then owner and code -- read-only.
-
-    Assumes the caller (portal.py) has already run st.set_page_config
-    with layout="wide" -- that call can only happen once per app and
-    must be the first streamlit command, so it doesn't belong in here.
-    """
-    frames = load_data()
-    data_loaded_at, problems, data_warnings = frames[-3:]
-    product_dc, trend_frames, spec_frames, _split_frames = frames_by_product(frames)
-
-    if problems:
-        st.error("pull_data() 가 돌려준 데이터가 대시보드 형식과 맞지 않습니다:")
-        for p in problems:
-            st.write("- " + p)
-        st.stop()
-
-    # 치명적이지 않은 것들은 접어서 보여준다. 일부 wafer 가 trend 에 없는
-    # 정도로 대시보드 전체를 막으면, 정작 멀쩡한 나머지 hold 를 못 본다.
-    if data_warnings:
-        with st.expander(f"⚠️ 데이터 참고사항 {len(data_warnings)}건 (대시보드는 정상 동작)"):
-            for w in data_warnings:
-                st.write("- " + w)
-
-    # the comment box is a disabled (read-only) text_area, which streamlit
-    # renders in light gray by default; override to black and slightly larger
-    # so it's actually legible. -webkit-text-fill-color is needed too since
-    # some browsers ignore `color` on a disabled field and only honor this.
-    # Drawn before the page switch below, since both pages use these rules.
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stTextArea"] textarea:disabled {
-            color: #000 !important;
-            -webkit-text-fill-color: #000 !important;
-            font-size: 1.05rem !important;
-        }
-        /* shrink the status-filter / product-switch segmented controls so the
-           list title and both of them fit on a single row */
-        div[data-testid="stButtonGroup"] button[data-variant="segmented_control"] {
-            padding: 0.15rem 0.55rem !important;
-            min-height: unset !important;
-        }
-        div[data-testid="stButtonGroup"] button[data-variant="segmented_control"] p {
-            font-size: 0.8rem !important;
-        }
-        /* DC HOLD 바로가기. 사내 단축주소로 나가는 링크라 버튼처럼 보이게
-           네모 박스로 그린다 (st.link_button 은 이 자리에서 폭/여백이
-           제멋대로라 마크업으로 직접 그림) */
-        a.dc-hold-link {
-            /* line-height 를 못 박아 둔다. 기본값이면 브라우저마다 버튼
-               높이가 달라져 왼쪽 컬럼과 헤더 높이를 맞춰둔 게 어긋난다 */
-            display: inline-block; padding: 3px 14px; line-height: 1.35;
-            border: 1px solid #d0d3d9; border-radius: 8px;
-            background: #fff; color: #d33 !important;
-            font-size: 0.85rem; font-weight: 700; text-decoration: none !important;
-        }
-        a.dc-hold-link:hover { background: #fff1f0; border-color: #d33; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # 최상단 페이지 전환. 정적 리포트와 같은 두 화면이고 기본은 DC OCAP.
-    # required=True 는 여기서도 같은 이유다 -- 없으면 눌린 걸 다시 눌러
-    # 아무 페이지도 안 골라진 상태가 된다.
-    page = st.segmented_control(
-        "페이지", PAGES, default=PAGES[0], required=True,
-        label_visibility="collapsed", key=f"{KEY_PREFIX}page",
-    ) or PAGES[0]
-    if page == "WAC Trend":
-        render_wac_page(product_dc, trend_frames, spec_frames, data_loaded_at)
-        return
-
-    # the counts sit inside the h1 so their 0.42em resolves against the same
-    # heading size -- that keeps them consistent without having to hardcode
-    # whatever px streamlit's h1 currently renders at. "Latest Data" used to
-    # sit here too but now rides just above the trend panel, next to the
-    # DC HOLD link.
-    new_counts = ", ".join(f"{p} : {count_new_holds(product_dc[p])}건" for p in product_dc)
-    st.markdown(
-        f"# Hold 현황 "
-        f"<span style='display:inline-block; vertical-align:bottom; {HEAD_META_STYLE}'>"
-        f"신규 hold 건수<br>{new_counts}</span>",
-        unsafe_allow_html=True,
-    )
-
-    PANEL_HEIGHT = 650
-    # the left column splits the total between the grouped list and the
-    # breakdown of whichever lot is selected
-    LIST_HEIGHT = 400
-    DETAIL_HEIGHT = PANEL_HEIGHT - LIST_HEIGHT
-    # trend matches the list box beside it, so comment matches the breakdown --
-    # both columns still add up to PANEL_HEIGHT and end level. This works
-    # because the right header is two rows now (link, then title + timestamp),
-    # same as the left's (title + filter, then product switch)
-    TREND_HEIGHT = LIST_HEIGHT
-    COMMENT_HEIGHT = PANEL_HEIGHT - TREND_HEIGHT
-    DETAIL_COLS = ["rw_cnt", "wafer_id", "item_id", "hold_inform"]
-    # tracks the last wafer point clicked in the trend chart, independent of
-    # any one widget's key, so it survives the list/nav-index switch a click
-    # can trigger (which would otherwise remount the chart and lose its own
-    # state)
-    focus_key = f"{KEY_PREFIX}focused_wafer"
-
-    left, right = st.columns([2, 3])
-
-    with left:
-        title_col, status_col, switch_col = st.columns([1.3, 1.75, 1.6])
-        with title_col:
-            st.markdown(
-                "<div style='font-size:1.15rem; font-weight:700; padding-top:0.3rem;'>"
-                "DC OCAP List</div>",
-                unsafe_allow_html=True,
-            )
-        with status_col:
-            # required=True: same reasoning as the product switch below - without
-            # it, clicking the active option deselects it instead of staying put
-            status_filter = st.segmented_control(
-                "상태", ["전체", "hold", "이력"], default="hold", required=True,
-                label_visibility="collapsed", key=f"{KEY_PREFIX}status_filter",
-            )
-        with switch_col:
-            # required=True: without it, clicking the active product deselects it
-            # and the list silently falls back to ULY with no product highlighted
-            # width="stretch": fills the column so it lands flush with the right
-            # edge of the list table below, matching the requested layout
-            selected_product = st.segmented_control(
-                "제품", list(product_dc.keys()), default="ULY", required=True,
-                label_visibility="collapsed", key=f"{KEY_PREFIX}product_switch", width="stretch",
-            )
-        selected_product = selected_product or "ULY"
-        status_filter = status_filter or "hold"
-
-        full_dc_df = product_dc[selected_product]
-        empty_note = None
-        if full_dc_df is None or full_dc_df.empty or "hold_time" not in full_dc_df.columns:
-            full_dc_df = pd.DataFrame(columns=DC_REQUIRED)
-            empty_note = f"{selected_product} 은(는) 조회 기간에 hold 건이 없습니다."
-        # a clicked chart point is resolved against the full (unfiltered) set,
-        # since its history shouldn't disappear just because the current status
-        # filter happens to hide the lot it belongs to
-        dc_df = filter_by_status(full_dc_df, status_filter)
-        grouped = group_holds(dc_df)
-        # 빈 표만 남으면 고장난 화면처럼 보인다. 비어 있는 이유를 그 자리에서
-        # 말해준다 (정적 리포트의 리스트도 같은 문구를 쓴다)
-        if empty_note is None and grouped.empty:
-            empty_note = (
-                "조치 대기 중인 hold 가 없습니다. '전체' 나 '이력' 을 눌러보세요."
-                if status_filter == "hold" else "이 조건에 맞는 행이 없습니다."
-            )
-        if empty_note:
-            st.caption(empty_note)
-
-        # a chart click on the previous run may have asked to switch the list's
-        # own selection to a different lot; that has to happen here, before the
-        # dataframe widget below is instantiated, since a widget's session_state
-        # key can no longer be written once the widget itself has been created
-        table_key = f"{KEY_PREFIX}dc_table_{selected_product}"
-        pending_switch = st.session_state.pop(f"{KEY_PREFIX}pending_lot_switch", None)
-        if pending_switch and pending_switch.get("product") == selected_product:
-            match_idx = grouped.index[
-                (grouped["lot_id"] == pending_switch["lot_id"])
-                & grouped["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(pending_switch["rw_cnt"]))
-            ]
-            if len(match_idx):
-                st.session_state[table_key] = {
-                    "selection": {"rows": [int(match_idx[0])], "columns": []}
-                }
-
-        event = st.dataframe(
-            grouped[GROUP_COLS],
-            width="stretch",
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            height=LIST_HEIGHT,
-            key=table_key,
-        )
-        selected_rows = event.selection.rows if event and event.selection else []
-
-        # the grouped row only says "item1외 2건", so the selected lot is broken
-        # back out here: which wafer was held on which item, and why. rw_cnt
-        # comes along too -- the same lot_id can have several hold events, and
-        # the trend/limits below must stick to the one that was clicked, not
-        # every event the lot has ever had
-        sel_lot_id = grouped.iloc[selected_rows[0]]["lot_id"] if selected_rows else None
-        sel_rw_cnt = grouped.iloc[selected_rows[0]]["rw_cnt"] if selected_rows else None
-        with st.container(height=DETAIL_HEIGHT, border=True):
-            if sel_lot_id is None:
-                st.caption("행을 클릭하면 해당 lot 의 wafer / item 내역이 표시됩니다.")
-            else:
-                # every rw_cnt of the lot, not just the one the clicked row
-                # stands for -- seeing the original next to its rework is the
-                # point of the breakdown. Read from the unfiltered frame, or
-                # the hold view would hide the already-dispositioned pass and
-                # leave only the row that was clicked.
-                detail = full_dc_df[full_dc_df["lot_id"] == sel_lot_id].copy()
-                # astype(object) first: mapping a category column twice makes
-                # pandas try to rebuild it as a category, and since this map's
-                # result is tuples, pandas mistakes them for a MultiIndex and
-                # raises inside `.hasnans` instead of just building the column
-                detail["_w"] = detail["wafer_id"].astype(object).map(norm_wafer).map(
-                    lambda v: (0, v) if isinstance(v, int) else (1, str(v))
-                )
-                # rework on top, then wafers ascending, items grouped per wafer
-                sort_cols = (["rw_cnt"] if "rw_cnt" in detail.columns else []) + ["_w", "item_id"]
-                ascending = ([False] if "rw_cnt" in detail.columns else []) + [True, True]
-                detail = detail.sort_values(sort_cols, ascending=ascending)
-                st.caption(f"{sel_lot_id} · {len(detail)}건")
-                st.dataframe(
-                    detail[DETAIL_COLS],
-                    width="stretch",
-                    hide_index=True,
-                    height=DETAIL_HEIGHT - 75,
-                )
-
-    with right:
-        # 제목과 링크/데이터 시각을 한 줄에 둔다. st.subheader 를 따로 쓰면
-        # 제목과 이 블록이 두 줄로 쌓여 패널이 그만큼 아래로 밀리므로, 하나의
-        # flex 로 직접 그린다. align-items:flex-end 라 오른쪽 블록의 아랫줄이
-        # 제목 밑선과 나란히 떨어진다.
-        # href 는 반드시 절대주소(https://go/...)여야 한다 -- "go/dcocap" 만
-        # 쓰면 현재 페이지 기준 상대경로로 붙어서 포털 안쪽 주소로 새고,
-        # 주소창에 칠 때처럼 호스트명으로 풀리지 않는다.
-        # 오른쪽 블록의 text-align:right 가 trend 패널 오른쪽 끝선을 맞춘다.
-        # 한 블록으로 그린다. st.subheader 를 쓰면 그 자체가 별도 블록이라
-        # 링크/시각과 같은 줄에 못 오고, 블록마다 streamlit 이 여백을 넣어
-        # 왼쪽 컬럼보다 헤더가 훨씬 두꺼워진다. 폰트 크기는 정적 리포트의
-        # h2(1.4rem)와 맞춰 두 화면이 같아 보이게 한다.
-        st.markdown(
-            f"<div style='margin-bottom:0;'>"
-            f"<div style='text-align:right;'>"
-            f"<a class='dc-hold-link' href='{DC_HOLD_URL}' target='_blank' rel='noopener'>"
-            f"DC HOLD LINK</a></div>"
-            f"<div style='display:flex; align-items:flex-end; "
-            f"justify-content:space-between; gap:1rem;'>"
-            f"<div style='font-size:1.4rem; font-weight:700; line-height:1;'>Item Trend</div>"
-            f"<div style='font-size:0.8rem; color:#888;'>"
-            f"(Latest Data : {data_loaded_at})</div>"
-            f"</div></div>",
-            unsafe_allow_html=True,
-        )
-        product = selected_product
-
-        lot_id = sel_lot_id
-        rw_cnt = sel_rw_cnt
-        # scoped to the clicked event's rw_cnt too, not just its lot_id -- a
-        # rework shares the lot_id with its original hold, and without this
-        # the item list, control limits and paging state below would mix the
-        # two events together
-        lot_rows = (
-            dc_df[
-                (dc_df["lot_id"] == lot_id)
-                & dc_df["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(rw_cnt))
-            ]
-            if lot_id is not None else None
-        )
-
-        # one chart per measurement item, stepped through with the arrows
-        items = list(dict.fromkeys(lot_rows["item_id"])) if lot_rows is not None else []
-        nav_key = f"{KEY_PREFIX}item_idx_{selected_product}_{lot_id}_{norm_rw_cnt(rw_cnt)}"
-        item_idx = min(st.session_state.get(nav_key, 0), max(len(items) - 1, 0))
-        item_id = items[item_idx] if items else None
-
-        tdf, item_col = find_trend_df(trend_frames, product, item_id) if item_id is not None else (None, None)
-
-        # the focused wafer only applies while looking at the same product/item
-        # it was clicked on -- paging away (or switching product) falls back to
-        # the lot-level view, same as if nothing had been clicked
-        _focus = st.session_state.get(focus_key)
-        chart_focus_pair = None
-        if _focus and _focus["product"] == product and _focus["item_id"] == item_id:
-            chart_focus_pair = (_focus["root_lot_id"], _focus["wafer_id"])
-
-        with st.container(height=TREND_HEIGHT, border=True):
-            if lot_id is None:
-                st.info("왼쪽에서 hold 행을 클릭하면 trend 차트가 표시됩니다.")
-            else:
-                nav_prev, nav_label, nav_next, nav_gap, legend_col, reset_col = st.columns(
-                    [0.6, 2.2, 0.6, 1.8, 2, 1.6]
-                )
-                with nav_prev:
-                    if st.button("◀", key=f"prev_{nav_key}", disabled=item_idx == 0, width="stretch"):
-                        st.session_state[nav_key] = item_idx - 1
-                        st.rerun()
-                with nav_label:
-                    st.markdown(
-                        f"<div style='text-align:center; padding-top:0.35rem;'>"
-                        f"<b>{item_id}</b> <span style='color:#888;'>({item_idx + 1}/{len(items)})</span></div>",
-                        unsafe_allow_html=True,
-                    )
-                with nav_next:
-                    if st.button("▶", key=f"next_{nav_key}", disabled=item_idx >= len(items) - 1, width="stretch"):
-                        st.session_state[nav_key] = item_idx + 1
-                        st.rerun()
-                with legend_col:
-                    legend_label = st.selectbox(
-                        "Legend", list(LEGEND_FIELD_OPTIONS.keys()), index=0,
-                        label_visibility="collapsed", key=f"{KEY_PREFIX}legend_select_{nav_key}",
-                    )
-                legend_field = LEGEND_FIELD_OPTIONS[legend_label]
-                rev_key = f"{KEY_PREFIX}chart_rev_{nav_key}_{item_idx}"
-                with reset_col:
-                    # bumps this chart's uirevision so plotly drops any zoom/pan
-                    # back to the layout default, without remounting the widget
-                    # (which would also throw away the clicked-point selection).
-                    # This can't live inside plotly's own modebar next to zoom/pan:
-                    # a modebar button's click handler has to be a JS function, and
-                    # st.plotly_chart's `config` only carries JSON to the frontend,
-                    # so there's no way to wire it to this rerun from here.
-                    if st.button("차트 초기화", key=f"reset_{rev_key}", help="확대/이동을 초기 상태로", width="stretch"):
-                        st.session_state[rev_key] = st.session_state.get(rev_key, 0) + 1
-                        st.rerun()
-
-                if tdf is None:
-                    st.warning(f"{item_id} 에 매칭되는 trend 데이터를 찾지 못했습니다.")
-                else:
-                    # only the wafers held for THIS item are the excursion
-                    item_rows = lot_rows[lot_rows["item_id"] == item_id]
-                    bad_pairs = set(zip(item_rows["root_lot_id"].map(norm_lot),
-                                        item_rows["wafer_id"].map(norm_wafer)))
-                    wafer_list = ",".join(str(w) for w in sort_wafers(item_rows["wafer_id"]))
-
-                    if tdf[item_col].notna().sum() == 0:
-                        st.warning(f"{item_id} 은(는) 이 제품 trend 에 측정값이 없습니다.")
-
-                    fig = build_scatter(
-                        tdf, item_col, bad_pairs, str(lot_id), legend_field,
-                        spec_frames.get(product),
-                        chart_height=TREND_HEIGHT - 150, focus_pair=chart_focus_pair,
-                    )
-                    fig.update_layout(uirevision=st.session_state.get(rev_key, 0))
-
-                    chart_event = st.plotly_chart(
-                        fig, width="stretch",
-                        on_select="rerun", selection_mode="points",
-                        key=f"{KEY_PREFIX}chart_{nav_key}_{item_idx}",
-                    )
-                    points = chart_event.selection.points if chart_event and chart_event.selection else []
-                    if points and points[0].get("customdata"):
-                        cd = points[0]["customdata"]
-                        new_root, new_wafer = cd[0], cd[1]  # HOVER_COLS: root_lot_id, wafer_id, ...
-                        new_focus = {
-                            "product": product, "item_id": item_id,
-                            "root_lot_id": new_root, "wafer_id": new_wafer,
-                        }
-                        if new_focus != _focus:
-                            st.session_state[focus_key] = new_focus
-                            # if the clicked wafer belongs to a different lot than
-                            # the one currently checked in the list, switch the
-                            # list's own selection to match -- looked up against
-                            # the unfiltered set so a status-filtered-out lot's
-                            # history still resolves, even though there is then
-                            # no row left to check in the (filtered) list
-                            item_key = str(item_id).strip().lower()
-                            click_rows = full_dc_df[
-                                full_dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(new_root))
-                                & full_dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(new_wafer))
-                                & full_dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key)
-                            ]
-                            # the same wafer/item can be held twice under the
-                            # same lot (an original pass and its rework) -- if
-                            # the click matches more than one event, stay on
-                            # the one already in view rather than jumping away
-                            # from under the user; otherwise prefer the most
-                            # recent rework
-                            if not click_rows.empty:
-                                current = click_rows[
-                                    (click_rows["lot_id"] == lot_id)
-                                    & click_rows["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(rw_cnt))
-                                ]
-                                pick = (
-                                    current if not current.empty
-                                    else click_rows.sort_values("rw_cnt", ascending=False)
-                                )
-                                click_lot_id = pick["lot_id"].iloc[0]
-                                click_rw_cnt = pick["rw_cnt"].iloc[0]
-                            else:
-                                click_lot_id = None
-                                click_rw_cnt = None
-                            if click_lot_id is not None and (
-                                (click_lot_id, norm_rw_cnt(click_rw_cnt))
-                                != (lot_id, norm_rw_cnt(rw_cnt))
-                            ):
-                                # the list widget was already instantiated this
-                                # run, so its selection can't be seeded until the
-                                # next run - see pending_switch handling above
-                                st.session_state[f"{KEY_PREFIX}pending_lot_switch"] = {
-                                    "product": selected_product, "lot_id": click_lot_id,
-                                    "rw_cnt": click_rw_cnt,
-                                }
-                                # keep the same item in view after the switch,
-                                # if the newly-selected lot's event also holds it
-                                new_lot_items = list(dict.fromkeys(
-                                    dc_df[
-                                        (dc_df["lot_id"] == click_lot_id)
-                                        & dc_df["rw_cnt"].map(norm_rw_cnt).eq(norm_rw_cnt(click_rw_cnt))
-                                    ]["item_id"]
-                                ))
-                                new_nav_key = (
-                                    f"{KEY_PREFIX}item_idx_{selected_product}"
-                                    f"_{click_lot_id}_{norm_rw_cnt(click_rw_cnt)}"
-                                )
-                                st.session_state[new_nav_key] = (
-                                    new_lot_items.index(item_id) if item_id in new_lot_items else 0
-                                )
-                            st.rerun()
-
-                    st.caption(
-                        f"제품: {product} · lot_id: {lot_id} · "
-                        f"wafer_id: {wafer_list} · item: {item_id}"
-                    )
-
-        with st.container(height=COMMENT_HEIGHT, border=True):
-            if lot_id is None:
-                st.caption("Comment")
-            else:
-                # the disposition is recorded in the company system and merged
-                # into dc, so it is shown read-only rather than edited here.
-                # Clicking a point in the chart focuses on that wafer's own
-                # record instead of the currently selected lot's held wafers;
-                # matching is by (root_lot_id, wafer_id, item_id) rather than
-                # lot_id, since the clicked wafer may belong to a different lot
-                # (or to none at all, if it was never held).
-                if chart_focus_pair is not None:
-                    click_lot, click_wafer = chart_focus_pair
-                    item_key = str(item_id).strip().lower() if item_id else None
-                    # looked up against the full (unfiltered) set: a wafer's own
-                    # history shouldn't read as "없음" just because the current
-                    # status filter hides the lot it belongs to
-                    focus_rows = full_dc_df[
-                        full_dc_df["root_lot_id"].map(norm_lot).eq(norm_lot(click_lot))
-                        & full_dc_df["wafer_id"].map(norm_wafer).eq(norm_wafer(click_wafer))
-                        & (full_dc_df["item_id"].astype(str).str.strip().str.lower().eq(item_key) if item_key else False)
-                    ]
-                    st.caption(f"선택한 wafer: {norm_lot(click_lot)} #{norm_wafer(click_wafer)}")
-                else:
-                    focus_rows = lot_rows[lot_rows["item_id"] == item_id] if item_id else lot_rows
-
-                disposition = format_disposition(focus_rows)
-                comment_text, owner_text, code_text = disposition or ("Comment 이력이 없습니다.", "-", "-")
-
-                comment_key = f"{KEY_PREFIX}comment_view_{nav_key}_{item_idx}_{chart_focus_pair}"
-                st.text_area(
-                    "Comment",
-                    value=comment_text,
-                    height=COMMENT_HEIGHT - (155 if chart_focus_pair is not None else 130),
-                    disabled=True,
-                    key=comment_key,
-                )
-                st.markdown(
-                    f"<div style='font-size:0.9em; line-height:1.7;'>"
-                    f"<b>owner</b> &nbsp;{owner_text}<br>"
-                    f"<b>code</b> &nbsp;&nbsp;{code_text}"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
 
 
 # ======================================================================
-# static-HTML export (dc_ocap.html) -- an alternative to show_dc_ocap()
-# for wherever the portal serves pages from can't run a live Python
-# process. Run this file directly (`python app.py`) on a schedule from
-# wherever pull_data() can actually reach the company system, then
-# upload the result next to the portal's other static reports (e.g. S3)
-# -- this only writes the local file, since the upload step needs
-# credentials this repo doesn't have.
+# dc_ocap.html 만들기.
 #
-# dc_ocap_template.html re-implements show_dc_ocap()'s whole interaction
-# model in vanilla JS + Plotly.js by hand -- see the comment at the top
-# of that file for why a straight "HTML export" of the Streamlit page
-# isn't possible and this had to be a separate port instead. Both share
-# pull_data()/check_data() above, so the real company-system swap only
-# has to happen once.
+# 사내 시스템에 닿는 곳에서 이 파일을 주기적으로 실행하고, 나온 파일을
+# 포털이 보는 자리(S3)에 올린다. 여기서는 로컬 파일만 쓴다 -- 올리는 데
+# 필요한 자격증명은 이 저장소에 없다.
+#
+# 화면 동작은 전부 dc_ocap_template.html 안의 자바스크립트에 있다. 파이썬은
+# 데이터를 골라 넣어줄 뿐이고, 그래서 두 쪽이 같은 판정을 내려야 하는 값
+# (솎는 기준, 이상값 시그마, 색)은 위 SHARED 한 곳에서만 나온다.
 # ======================================================================
 
 # __file__ only exists when this runs as an actual .py script (which is
@@ -2427,9 +1199,7 @@ def build_dc_ocap_html() -> Path:
     # 건수만 제품 전환 버튼과 다른 순서로 나온다 (예전에 그랬다).
     product_dc, product_trend, product_spec, product_split = frames_by_product(pull_data())
 
-    # same validation the Streamlit page runs before trusting the data --
-    # a bad schema should fail the scheduled build loudly rather than ship
-    # a broken dc_ocap.html. Warnings are printed but must not stop the
+    # 스키마가 틀리면 깨진 dc_ocap.html 을 내보내지 말고 시끄럽게 멈춘다. Warnings are printed but must not stop the
     # build: this runs hourly and uploads to S3, so failing over a few
     # wafers missing from trend would freeze the portal on a stale report.
     problems, warnings = check_data(product_dc, product_trend, product_spec, product_split)
@@ -2530,28 +1300,14 @@ def build_dc_ocap_html() -> Path:
 
 # Three ways this file gets loaded, and what each one should do:
 #
-#   python app.py          -> build the static dc_ocap.html export
-#   streamlit run app.py   -> render the dashboard standalone (preview)
-#   import from portal.py  -> define show_dc_ocap() and nothing else
-#
-# __name__ alone can't tell the first two apart: `streamlit run` also
-# executes the script as "__main__", so guarding on that by itself would
-# silently re-run the whole export -- a full data pull and a multi-MB file
-# write -- on every widget click, while rendering a blank page because
-# nothing called show_dc_ocap(). st.runtime.exists() is what separates
-# them; it's False under a plain interpreter and True inside a running
-# Streamlit server. The import case is already excluded by __name__.
+# 이 파일을 직접 실행하면 리포트를 만든다. import 하면 아무 일도 안 한다
+# -- 스케줄러 스크립트나 노트북에서 build_dc_ocap_html() 만 따로 부를 수
+# 있게 하기 위해서다.
 if __name__ == "__main__":
-    if st.runtime.exists():
-        # standalone preview: this file is the main script, so nothing else
-        # has claimed set_page_config yet (portal.py calls its own)
-        st.set_page_config(page_title="DC OCAP", layout="wide")
-        show_dc_ocap()
-    else:
-        # BuildError 는 사람이 읽는 안내문이다. traceback 없이 그대로 보여
-        # 주고 0 이 아닌 코드로 끝낸다 -- 스케줄러가 실패를 알아채야 한다.
-        try:
-            build_dc_ocap_html()
-        except BuildError as err:
-            print(f"\n빌드 실패: {err}", file=sys.stderr)
-            raise SystemExit(1)
+    # BuildError 는 사람이 읽는 안내문이다. traceback 없이 그대로 보여
+    # 주고 0 이 아닌 코드로 끝낸다 -- 스케줄러가 실패를 알아채야 한다.
+    try:
+        build_dc_ocap_html()
+    except BuildError as err:
+        print(f"\n빌드 실패: {err}", file=sys.stderr)
+        raise SystemExit(1)
