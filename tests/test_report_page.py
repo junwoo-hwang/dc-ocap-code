@@ -343,3 +343,77 @@ def test_only_the_background_is_thinned(wac_page):
     assert sum(len(v) for v in data.values()) > app.WAC_MAX_GRAY, (
         "솎는 게 관찰되려면 원본이 상한보다 많아야 한다"
     )
+
+
+# ---------------------------------------------------- DC OCAP 목록 필터
+
+def _filter(page, rows, view):
+    """페이지의 filterByStatus 를 직접 불러 (lot_id, rw_cnt) 목록을 돌려준다."""
+    return page.evaluate(
+        """([rows, view]) => filterByStatus(rows, view)
+             .map(r => r.lot_id + '|' + normRwCnt(r.rw_cnt))
+             .filter((v, i, a) => a.indexOf(v) === i)""", [rows, view])
+
+
+def _row(lot, rw, **over):
+    r = {"lot_id": lot, "rw_cnt": rw, "root_lot_id": lot.split(".")[0], "wafer_id": 1,
+         "item_id": "item1", "code": None, "owner": None, "comment": None, "status": "Hold"}
+    r.update(over)
+    return r
+
+
+def test_a_reworked_lot_moves_its_earlier_hold_to_history(wac_page):
+    """같은 lot 이 다시 걸리면 앞 건은 끝난 것이다 -- hold 에 남기지 않는다."""
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0), _row("A.1", 1)]
+    assert _filter(page, rows, "hold") == ["A.1|1"]
+    assert _filter(page, rows, "이력") == ["A.1|0"]
+
+
+def test_supersession_follows_the_whole_rework_chain(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0), _row("A.1", 1), _row("A.1", 2)]
+    assert _filter(page, rows, "hold") == ["A.1|2"]
+    assert sorted(_filter(page, rows, "이력")) == ["A.1|0", "A.1|1"]
+
+
+def test_supersession_is_scoped_to_one_lot(wac_page):
+    """다른 lot 의 rw_cnt 가 높다고 이 lot 이 밀려나면 안 된다."""
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0), _row("B.1", 3)]
+    assert sorted(_filter(page, rows, "hold")) == ["A.1|0", "B.1|3"]
+
+
+def test_a_row_with_no_rw_cnt_is_neither_pushed_out_nor_pushes(wac_page):
+    """순서를 매길 수 없는 줄은 건드리지 않는다."""
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", None), _row("A.1", 2)]
+    assert sorted(_filter(page, rows, "hold")) == ["A.1|", "A.1|2"]
+
+
+def test_a_dispositioned_rework_leaves_the_earlier_one_in_history(wac_page):
+    """새 건이 이미 조치됐어도 앞 건이 hold 로 돌아오지는 않는다."""
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0), _row("A.1", 1, code="Flow", owner="김", status="Run")]
+    assert _filter(page, rows, "hold") == []
+    assert sorted(_filter(page, rows, "이력")) == ["A.1|0", "A.1|1"]
+
+
+def test_one_hold_event_never_lands_in_both_lists(wac_page):
+    """한 건 안에서 item 별로 조치가 갈려도 목록에는 한 번만 나와야 한다.
+
+    목록은 (lot_id, rw_cnt) 마다 한 줄이라, 줄 단위로 가르면 같은 건이
+    hold 와 이력 양쪽에 다 뜬다 (이 규칙을 넣기 전에 실제로 그랬다).
+    """
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0, item_id="item1"),
+            _row("A.1", 0, item_id="item2", code="Flow", owner="김", status="Run")]
+    hold, hist = _filter(page, rows, "hold"), _filter(page, rows, "이력")
+    assert set(hold) & set(hist) == set(), (hold, hist)
+    assert len(hold) + len(hist) == 1
+
+
+def test_the_whole_list_view_is_untouched(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    rows = [_row("A.1", 0), _row("A.1", 1), _row("B.1", 0, code="Flow", owner="김")]
+    assert len(_filter(page, rows, "전체")) == 3

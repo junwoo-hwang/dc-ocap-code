@@ -686,7 +686,8 @@ function countNewHolds(dcRows) {
   return groupHolds(filterByStatus(dcRows, "hold")).length;
 }
 
-// "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 정확히 'Hold'.
+// "조치가 안 됨" = code/owner 가 둘 다 비어있고 + status 가 정확히 'Hold' +
+// 그 lot 에서 더 높은 rw_cnt 가 나오지 않았을 것.
 // dc 는 30분마다 갱신되지만 owner/comment 는 다음날 아침에야 적재되므로,
 // 코멘트를 달고 flow 시킨 건이 하루 동안 hold 에 남는 것을 막으려면
 // 제때 갱신되는 status 를 같이 봐야 합니다.
@@ -699,13 +700,47 @@ function filterByStatus(dcRows, view) {
   // status 없는 dc 에서 hold 가 통째로 0건이 되어 파이썬과 갈린다.
   const hasStatus = dcRows.length > 0 &&
     Object.prototype.hasOwnProperty.call(dcRows[0], "status");
-  const undisp = dcRows.filter(r =>
+
+  // 같은 lot 이 rework 로 다시 걸리면 앞 건은 끝난 것이다 (rw_cnt 0 이 있다가
+  // 1 이 생기면 0 은, 1 이 있다가 2 가 생기면 1 은). 그 lot 에서 가장 높은
+  // rw_cnt 만 아직 열려 있는 hold 로 보고 나머지는 이력으로 보낸다.
+  //
+  // rw_cnt 를 못 읽는 줄(빈 값)은 순서를 매길 수 없으므로 건드리지 않는다 --
+  // 밀어내지도, 밀려나지도 않는다.
+  const rwNum = (r) => {
+    const s = normRwCnt(r.rw_cnt);
+    const n = s === "" ? NaN : Number(s);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const latestRw = new Map();
+  for (const r of dcRows) {
+    const n = rwNum(r);
+    if (Number.isNaN(n)) continue;
+    const lot = String(r.lot_id);
+    if (!latestRw.has(lot) || n > latestRw.get(lot)) latestRw.set(lot, n);
+  }
+  const superseded = (r) => {
+    const n = rwNum(r);
+    return !Number.isNaN(n) && latestRw.get(String(r.lot_id)) > n;
+  };
+
+  const open = (r) =>
     blank(r.code) && blank(r.owner) &&
-    (!hasStatus || String(r.status ?? "").trim() === "Hold")
-  );
-  if (view === "hold") return undisp;
-  const undispSet = new Set(undisp);
-  return dcRows.filter(r => !undispSet.has(r));
+    (!hasStatus || String(r.status ?? "").trim() === "Hold") &&
+    !superseded(r);
+
+  // 판정은 줄이 아니라 hold 건 단위로 한다. 목록은 (lot_id, rw_cnt) 마다 한
+  // 줄인데 줄 단위로 가르면, 한 건 안에서 item 별로 조치가 갈린 경우 그 건이
+  // hold 와 이력 양쪽에 다 뜬다 (이 규칙을 넣기 전부터 그랬다).
+  // 한 줄이라도 아직 조치가 안 됐으면 그 건은 열려 있는 것으로 본다 --
+  // 놓치는 것보다 한 번 더 보이는 쪽이 낫다.
+  const eventKey = (r) => String(r.lot_id) + "||" + normRwCnt(r.rw_cnt);
+  const openEvents = new Set();
+  for (const r of dcRows) if (open(r)) openEvents.add(eventKey(r));
+
+  return view === "hold"
+    ? dcRows.filter(r => openEvents.has(eventKey(r)))
+    : dcRows.filter(r => !openEvents.has(eventKey(r)));
 }
 
 // One row per (lot_id, rw_cnt). rw_cnt is part of the key rather than
