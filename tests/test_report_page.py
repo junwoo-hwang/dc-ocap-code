@@ -417,3 +417,87 @@ def test_the_whole_list_view_is_untouched(wac_page):
     page, _planted, _traces, _errors = wac_page
     rows = [_row("A.1", 0), _row("A.1", 1), _row("B.1", 0, code="Flow", owner="김")]
     assert len(_filter(page, rows, "전체")) == 3
+
+
+# --------------------------------------------- 타점 선택 (진짜 마우스로)
+#
+# 여기는 g.emit(...) 같은 합성 이벤트를 쓰지 않는다. 실제 결함이 DOM click 과
+# plotly_click 의 순서/간격에서 났고, 합성 이벤트는 그 경로를 안 지나서
+# 아무것도 못 잡았다.
+
+def _mouse_click_point(page, chart=0, nth=0):
+    pos = page.evaluate(
+        """([c, n]) => {
+          const g = document.querySelectorAll('.wac-chart div.js-plotly-plot')[c];
+          const ps = g.querySelectorAll('.points path');
+          if (!ps[n]) return null;
+          const r = ps[n].getBoundingClientRect();
+          return [r.left + r.width / 2, r.top + r.height / 2];
+        }""", [chart, nth])
+    assert pos, "타점을 못 찾았습니다"
+    page.mouse.click(pos[0], pos[1])
+    page.wait_for_timeout(1200)
+
+
+def _selected(page):
+    return page.evaluate("() => state.wacSelected")
+
+
+def _close_modal(page):
+    page.evaluate("() => closeWacModal()")
+    page.wait_for_timeout(200)
+
+
+def test_clicking_the_same_point_again_clears_the_selection(wac_page):
+    """조치 내역이 있는 타점도 다시 누르면 풀려야 한다.
+
+    팝업을 띄우면서 선택을 덮어쓰기만 하면 그 wafer 는 영영 해제할 수 없다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    _mouse_click_point(page)
+    assert _selected(page) is not None
+    _close_modal(page)
+    _mouse_click_point(page)
+    assert _selected(page) is None, "다시 눌렀는데 안 풀렸습니다"
+
+
+def test_clicking_empty_chart_space_clears_the_selection(wac_page):
+    """어느 차트든 빈 곳을 누르면 선택이 풀린다."""
+    page, _planted, _traces, _errors = wac_page
+    _mouse_click_point(page)
+    assert _selected(page) is not None
+    _close_modal(page)
+    empty = page.evaluate(
+        """() => { const g = document.querySelectorAll('.wac-chart div.js-plotly-plot')[1];
+                   const r = g.getBoundingClientRect(); return [r.left + 16, r.top + 12]; }""")
+    page.mouse.click(empty[0], empty[1])
+    page.wait_for_timeout(900)
+    assert _selected(page) is None, "빈 곳을 눌렀는데 안 풀렸습니다"
+
+
+def test_a_real_click_on_a_point_does_not_clear_what_it_just_selected(wac_page):
+    """빈 곳 판정이 시간차였을 때, 타점 클릭이 스스로 지운 적이 있다.
+
+    선택을 반영하느라 차트를 전부 다시 칠하는 데 0.6초가 걸려서, DOM click 이
+    도착할 즈음엔 '방금 타점을 눌렀다' 는 시간 창이 이미 지나 있었다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    _mouse_click_point(page)
+    assert _selected(page) is not None, "타점을 눌렀는데 선택이 비어 있습니다"
+
+
+def test_clicking_the_legend_keeps_the_selection(wac_page):
+    """legend 클릭은 그 차트를 다루려는 것이지 선택을 풀려는 게 아니다."""
+    page, _planted, _traces, _errors = wac_page
+    _mouse_click_point(page)
+    _close_modal(page)
+    before = _selected(page)
+    box = page.evaluate(
+        """() => { const l = document.querySelector('.wac-chart div.js-plotly-plot .legend .traces');
+                   if (!l) return null; const r = l.getBoundingClientRect();
+                   return [r.left + 8, r.top + 8]; }""")
+    if not box:
+        pytest.skip("legend 가 없는 차트다")
+    page.mouse.click(box[0], box[1])
+    page.wait_for_timeout(900)
+    assert _selected(page) == before, "legend 를 눌렀는데 선택이 풀렸습니다"
