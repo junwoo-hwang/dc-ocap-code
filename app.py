@@ -549,6 +549,7 @@ def pull_data():
 import base64
 import gzip
 import json
+import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -633,6 +634,23 @@ WAC_MAX_GRAY = 1200
 # 5시그마는 진짜 이상값 2개만 걸렀다).
 OUTLIER_K = 5
 OUTLIER_MIN_N = 20      # 이보다 적으면 흩어진 정도를 못 믿는다
+
+# 규격이 아직 안 정해진 item 에 9999... 같은 자리표시자가 관리선으로 들어오는
+# 일이 있다. 그 값을 그대로 그리면 y축이 통째로 거기까지 늘어나서, 정작 봐야
+# 할 타점 수천 개가 바닥에 한 줄로 눌린다 (실제로 몇몇 제품에서 축이 100k 로
+# 고정됐다). 게다가 usl=99999 면 어떤 측정값도 '규격 안' 이라, 규격 안의 값은
+# 안 숨긴다는 이상값 규칙(isAbsurd) 까지 통째로 무력해진다.
+#
+# 자리표시자로 보는 기준은 둘이고, 하나만 맞아도 없는 값으로 친다:
+#   1) 9 로만 이루어진 정수 (9999, 99999, 999999 ...). 진짜 규격이 딱
+#      99999.0 인 item 은 없다. item 값의 크기와 무관하게 걸린다.
+#   2) 그 item 측정값 최대 절대값의 1000배를 넘는 큰 수. 88888 처럼 9 가
+#      아닌 자리표시자를 잡으려는 것이다. 1000배는 일부러 크게 잡았다 --
+#      규격이 넉넉한 item 의 진짜 관리선을 잘못 지우느니, 자리표시자 하나를
+#      놓치는 편이 낫다.
+# 무한대(inf) 도 자리표시자로 본다.
+LIMIT_SENTINEL_MIN = 9999
+LIMIT_SENTINEL_RATIO = 1000
 
 
 def shared_constants_js() -> str:
@@ -840,6 +858,76 @@ def resolve_item_col(trend_df: pd.DataFrame, item_id) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def is_placeholder_limit(value, data_max: float | None = None) -> bool:
+    """'규격 미정' 을 적어 둔 자리표시자인가 (99999 같은 것).
+
+    data_max 는 그 item 측정값의 최대 절대값이다. 없으면 9 로만 된 수만
+    걸러낸다 -- 잣대 없이 큰 수를 지우면 단위가 큰 item(저항, 카운트)의
+    멀쩡한 관리선이 사라진다. 판정 기준은 LIMIT_SENTINEL_* 주석 참고.
+    """
+    v = to_float(value)
+    if v is None:
+        return False
+    if not math.isfinite(v):
+        return True
+    size = abs(v)
+    if size < LIMIT_SENTINEL_MIN:
+        return False
+    if size == int(size) and set(str(int(size))) == {"9"}:
+        return True
+    return (data_max is not None and data_max > 0
+            and size > LIMIT_SENTINEL_RATIO * data_max)
+
+
+def drop_placeholder_limits(spec_df, trend_df) -> tuple[pd.DataFrame, list]:
+    """자리표시자 관리선을 비운 spec 과, 무엇을 뺐는지 목록을 돌려준다.
+
+    목록은 (item_id, 관리선 이름, 뺀 값들, 줄 수) 로, check_data 가 경고에
+    쓴다. spec 자체는 건드리지 않고 사본을 돌려준다.
+    """
+    dropped: list = []
+    if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
+        return spec_df, dropped
+    if any(c not in spec_df.columns for c in ("item_id", *LIMIT_COLS)):
+        return spec_df, dropped
+
+    # item 별 측정값 최대 절대값. trend 가 없으면 잣대 없이 9-자리표시자만.
+    data_max: dict[str, float] = {}
+    if isinstance(trend_df, pd.DataFrame) and not trend_df.empty:
+        for col in item_columns(trend_df):
+            nums = pd.to_numeric(trend_df[col], errors="coerce").abs()
+            nums = nums[np.isfinite(nums)]
+            if len(nums):
+                data_max[str(col).strip().lower()] = float(nums.max())
+
+    out = spec_df.copy()
+    keys = out["item_id"].astype(str).str.strip().str.lower()
+    for item_key, rows in out.groupby(keys, sort=False):
+        ceiling = data_max.get(item_key)
+        for which in LIMIT_COLS:
+            bad = rows[which].map(lambda v: is_placeholder_limit(v, ceiling))
+            if not bad.any():
+                continue
+            values = sorted({to_float(v) for v in rows.loc[bad, which]})
+            dropped.append((str(rows["item_id"].iloc[0]), which, values, int(bad.sum())))
+            out.loc[rows.index[bad.to_numpy()], which] = np.nan
+    return out, dropped
+
+
+def _describe_dropped_limits(product: str, dropped: list) -> str:
+    def one(item, which, values, n):
+        shown = ", ".join(("inf" if v is None or not math.isfinite(v)
+                           else f"{v:g}") for v in values[:2])
+        return f"{item}.{which}={shown}({n}개 개정)"
+    head = ", ".join(one(*d) for d in dropped[:4])
+    more = f" 외 {len(dropped) - 4}건" if len(dropped) > 4 else ""
+    return (
+        f"{product.lower()}_spec: 측정값과 자릿수가 동떨어진 관리선 {len(dropped)}건을 "
+        f"'규격 미정' 으로 보고 뺐습니다 -> {head}{more}. "
+        f"그대로 두면 y축이 그 값까지 늘어나 차트가 눌립니다."
+    )
+
+
 
 
 def check_data(product_dc: dict, trend_frames: dict,
@@ -972,6 +1060,12 @@ def check_data(product_dc: dict, trend_frames: dict,
                         f"{product.lower()}_spec: 관리선 값이 숫자가 아닙니다 -> {bad_lim[:4]}. "
                         f"해당 선은 안 그려집니다. float 로 변환하세요."
                     )
+                # 자리표시자 관리선. 빼는 것은 _spec_for_export 가 하고 여기서는
+                # 무엇이 빠졌는지만 알린다 -- 조용히 지우면, 규격이 왜 안 보이냐는
+                # 질문에 답할 수가 없다.
+                _clean, dropped = drop_placeholder_limits(spec_df, trend_df)
+                if dropped:
+                    warnings.append(_describe_dropped_limits(product, dropped))
                 # trend 의 item 이 spec 에 있는가
                 if not trend_df.empty:
                     have = set(spec_df["item_id"].astype(str).str.strip().str.lower())
@@ -1125,11 +1219,18 @@ def _columns(df: pd.DataFrame) -> dict:
     return {col: [_clean(v) for v in df[col]] for col in df.columns}
 
 
-def _spec_for_export(spec_df) -> pd.DataFrame:
-    """spec 을 브라우저로 보낼 모양으로: 필요한 컬럼만, from_time 은 datetime."""
+def _spec_for_export(spec_df, trend_df=None) -> pd.DataFrame:
+    """spec 을 브라우저로 보낼 모양으로: 필요한 컬럼만, from_time 은 datetime.
+
+    trend 를 같이 받는 이유는 자리표시자 관리선(99999 등) 을 여기서 비우기
+    때문이다. 무엇이 자리표시자인지는 그 item 의 실제 측정값을 잣대로 본다.
+    브라우저로 아예 안 보내므로, 선을 안 그리는 것뿐 아니라 SL OUT 판정과
+    이상값 숨김까지 한 번에 제자리를 찾는다.
+    """
     if not isinstance(spec_df, pd.DataFrame) or spec_df.empty:
         return pd.DataFrame(columns=SPEC_REQUIRED)
     out = spec_df[SPEC_REQUIRED].copy()
+    out, _dropped = drop_placeholder_limits(out, trend_df)
     out["from_time"] = pd.to_datetime(out["from_time"], errors="coerce")
     # 관리선까지 넣어 정렬하는 이유는 item_spec_rows() 쪽과 같다. 브라우저의
     # sort 는 안정 정렬이라, 여기 순서가 그대로 남아 같은 시각에 두 벌이
@@ -1224,7 +1325,8 @@ def build_dc_ocap_html() -> Path:
         # 공백 구분 문자열로 오면 공백(0x20) < "T"(0x54) 때문에 규격이 바뀐
         # 당일 측정에 이전 규격이 적용된다. 여기서 한 번 변환해 두면 어떤
         # 형식으로 들어와도 양쪽이 같은 표기가 된다.
-        "spec": {p: _columns(_spec_for_export(product_spec[p])) for p in product_spec},
+        "spec": {p: _columns(_spec_for_export(product_spec[p], product_trend.get(p)))
+                 for p in product_spec},
         # EIN/ECN 적용 이력. 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로
         # 찾아 팝업에 띄운다. 화면에서 열릴 수 없는 lot 은 싣지 않는다.
         "split": {

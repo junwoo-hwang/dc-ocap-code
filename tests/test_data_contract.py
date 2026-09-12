@@ -3,6 +3,11 @@
 여기서 잡으려는 것은 '조용히 틀리는' 부류다 -- 오류 없이 빈 화면이나
 빠진 타점으로 나타나서, 데이터를 아는 사람만 알아챌 수 있는 것들.
 """
+import base64
+import gzip
+import json
+import re
+
 import pandas as pd
 import pytest
 
@@ -74,6 +79,114 @@ def test_check_data_blocks_a_wiring_mistake(frames):
     wrong = {p: df.assign(root_lot_id="NOSUCHLOT") for p, df in dc.items()}
     problems, _warnings = app.check_data(wrong, trend, spec, split)
     assert any("하나도 매칭되지 않습니다" in p for p in problems), problems
+
+
+# ------------------------------------------------- 자리표시자 관리선
+# 규격이 아직 없는 item 에 usl=99999 가 들어오면 y축이 100k 까지 늘어나
+# 나머지 타점 전부가 바닥에 한 줄로 눌린다. 오류는 하나도 안 뜬다.
+
+@pytest.mark.parametrize("sentinel", [99999, 999999.0, 9999, -99999, float("inf")])
+def test_nine_placeholders_are_dropped_whatever_the_item_size(frames, sentinel):
+    """9 로만 된 값은 item 값의 크기와 상관없이 관리선이 아니다."""
+    trend = pd.DataFrame({"item1": [1e3, 1.2e3, 1.1e3]})     # 값 자체가 큰 item
+    spec = pd.DataFrame({"item_id": ["item1"], "from_time": ["2026-01-01"],
+                         "ucl": [1300.0], "lcl": [900.0],
+                         "usl": [float(sentinel)], "lsl": [800.0]})
+    out, dropped = app.drop_placeholder_limits(spec, trend)
+    assert pd.isna(out["usl"].iloc[0])
+    assert out["ucl"].iloc[0] == 1300.0, "멀쩡한 관리선까지 지우면 안 된다"
+    assert [d[1] for d in dropped] == ["usl"]
+
+
+def test_an_unusual_placeholder_is_caught_by_the_data_it_dwarfs():
+    """88888 처럼 9 가 아닌 자리표시자는 측정값을 잣대로 잡는다."""
+    trend = pd.DataFrame({"item1": [0.30, 0.55, 0.70]})
+    spec = pd.DataFrame({"item_id": ["item1"], "from_time": ["2026-01-01"],
+                         "ucl": [0.8], "lcl": [0.2], "usl": [88888.0], "lsl": [0.1]})
+    out, _ = app.drop_placeholder_limits(spec, trend)
+    assert pd.isna(out["usl"].iloc[0])
+    assert out["ucl"].iloc[0] == 0.8
+
+
+def test_a_generous_but_real_limit_survives():
+    """규격이 넉넉한 item 을 자리표시자로 오해하면 안 된다.
+
+    측정값의 1000배까지는 남긴다 -- 잘못 지우는 쪽이 더 위험하다.
+    """
+    trend = pd.DataFrame({"item1": [100.0, 150.0, 200.0]})
+    spec = pd.DataFrame({"item_id": ["item1"], "from_time": ["2026-01-01"],
+                         "ucl": [250.0], "lcl": [50.0], "usl": [20000.0], "lsl": [0.0]})
+    out, dropped = app.drop_placeholder_limits(spec, trend)
+    assert out["usl"].iloc[0] == 20000.0, dropped
+    assert dropped == []
+
+
+def test_without_trend_only_the_nine_rule_applies():
+    """잣대가 없으면 큰 수를 함부로 지우지 않는다."""
+    spec = pd.DataFrame({"item_id": ["item1", "item1"],
+                         "from_time": ["2026-01-01", "2026-02-01"],
+                         "ucl": [1.0, 1.0], "lcl": [0.0, 0.0],
+                         "usl": [99999.0, 88888.0], "lsl": [0.0, 0.0]})
+    out, _ = app.drop_placeholder_limits(spec, None)
+    assert pd.isna(out["usl"].iloc[0])
+    assert out["usl"].iloc[1] == 88888.0
+
+
+def test_placeholder_limits_never_reach_the_browser(frames):
+    """_spec_for_export 가 실제로 빼는가 -- 여기가 빠지면 화면이 그대로 눌린다."""
+    dc, trend, spec, _split = frames
+    poisoned = spec["ULY"].copy()
+    item = str(poisoned["item_id"].iloc[0])
+    poisoned.loc[poisoned.index[0], "usl"] = 99999.0
+    out = app._spec_for_export(poisoned, trend["ULY"])
+    assert out["usl"].max() < 99999.0
+    # 잣대를 안 넘겨주면 못 뺀다는 것도 같이 못박아 둔다
+    assert app._spec_for_export(poisoned)["usl"].max() < 99999.0   # 9-규칙으로 잡힘
+    assert item
+
+
+def test_the_built_page_carries_no_placeholder_limit(tmp_path, monkeypatch, frames):
+    """빌드가 잣대(trend)를 안 넘겨주면 9 가 아닌 자리표시자는 그대로 실린다.
+
+    이 검사가 없으면 drop_placeholder_limits 가 아무리 맞아도 화면은
+    그대로 눌린 채였다 -- 부르는 쪽에서 인자 하나만 빠지면 되니까.
+    """
+    dc, trend, spec, split = frames
+    item = str(spec["ULY"]["item_id"].iloc[0])
+    ceiling = pd.to_numeric(trend["ULY"][item], errors="coerce").abs().max()
+    sentinel = float(round(ceiling * 5000))       # 9 로만 된 수가 아니다
+    bad = spec["ULY"].copy()
+    bad.loc[bad.index[0], "usl"] = sentinel
+
+    real = app.pull_data
+
+    def poisoned():
+        out = list(real())
+        out[6] = bad                              # uly_spec 자리
+        return tuple(out)
+
+    monkeypatch.setattr(app, "pull_data", poisoned)
+    monkeypatch.setattr(app, "OUTPUT_PATH", tmp_path / "out.html")
+    html = app.build_dc_ocap_html().read_text(encoding="utf-8")
+
+    b64 = re.search(r'const DATA_B64 = "([^"]*)"', html).group(1)
+    payload = json.loads(gzip.decompress(base64.b64decode(b64)))
+    assert sentinel not in payload["spec"]["ULY"]["usl"], (
+        f"{sentinel} 가 그대로 실렸습니다. y축이 거기까지 늘어납니다."
+    )
+
+
+def test_check_data_names_the_item_whose_limit_was_dropped(frames):
+    dc, trend, spec, split = frames
+    poisoned = dict(spec)
+    bad = spec["ULY"].copy()
+    bad.loc[bad.index[0], "usl"] = 99999.0
+    poisoned["ULY"] = bad
+    problems, warnings = app.check_data(dc, trend, poisoned, split)
+    assert problems == [], "관리선 하나 때문에 리포트를 막으면 안 된다"
+    hit = [w for w in warnings if "자리표시자" in w or "동떨어진" in w]
+    assert hit, warnings
+    assert str(bad["item_id"].iloc[0]) in hit[0] and "usl" in hit[0]
 
 
 # ------------------------------------------------------- split -> 팝업

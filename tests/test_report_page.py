@@ -18,6 +18,7 @@ sync_playwright = pytest.importorskip(
 ).sync_playwright
 
 SENTINEL = 9.9e9
+PLACEHOLDER_LIMIT = 99999.0    # 규격 미정 자리표시자로 들어오는 관리선
 N_ZEROS = 12
 N_ROWS = 4000          # WAC_MAX_GRAY 보다 많아야 솎는 게 관찰된다
 
@@ -68,7 +69,19 @@ def report(tmp_path_factory):
         trend.loc[trend.index[:N_ZEROS], item_b] = 0.0
 
         item_c = next(c for c in app.item_columns(trend) if c not in (item_a, item_b))
-        planted.update(item_a=item_a, item_b=item_b, item_c=item_c)
+
+        # 규격이 아직 없는 item 에 usl=99999 가 들어온 경우. 그대로 그리면
+        # y축이 100k 까지 늘어나 나머지 타점이 바닥에 한 줄로 눌린다.
+        item_d = next(c for c in app.item_columns(trend)
+                      if c not in (item_a, item_b, item_c))
+        spec = frames[6].copy()
+        hit = (spec["item_id"].astype(str).str.strip().str.lower()
+               == str(item_d).strip().lower())
+        assert hit.any(), f"spec 에 {item_d} 가 없다"
+        spec.loc[hit, "usl"] = PLACEHOLDER_LIMIT
+        frames[6] = spec
+
+        planted.update(item_a=item_a, item_b=item_b, item_c=item_c, item_d=item_d)
         frames[3] = trend
         return tuple(frames)
 
@@ -330,6 +343,38 @@ def test_a_retested_wafer_shows_every_hold_event(wac_page):
     assert found["n"] >= 2 and len(set(found["rw"])) >= 2, found
     assert page.eval_on_selector_all(".dispo-event", "d => d.length") == found["n"]
     page.evaluate("() => closeWacModal()")
+
+
+def test_a_placeholder_limit_never_stretches_the_y_axis(wac_page):
+    """usl=99999 가 선으로 그려지면 축이 100k 로 고정되고 타점이 눌린다.
+
+    파이썬이 그 값을 빼서 보내므로 브라우저에는 애초에 도착하지 않아야
+    한다. 여기서 보는 것은 '실제로 축이 멀쩡한가' 하나다.
+    """
+    page, planted, _traces, _errors = wac_page
+    item = planted["item_d"]
+    page.fill("#wacSearch", item)
+    page.wait_for_timeout(2500)
+    info = page.evaluate(
+        """(want) => {
+          for (const box of document.querySelectorAll('.wac-chart')) {
+            const title = box.querySelector('.wac-chart-title');
+            if (!title || title.textContent.trim() !== want) continue;
+            const g = box.querySelector('div.js-plotly-plot');
+            if (!g || !g.data) return null;
+            const ys = [];
+            for (const t of g.data) if (t.mode === 'markers' && t.y) ys.push(...t.y);
+            return { range: g._fullLayout.yaxis.range,
+                     lines: g.data.filter(t => t.mode === 'lines').map(t => t.name),
+                     top: Math.max(...ys) };
+          }
+          return null;
+        }""", item)
+    assert info, f"{item} 차트를 못 찾았습니다"
+    assert "USL" not in info["lines"], "자리표시자가 관리선으로 그려졌습니다"
+    assert info["range"][1] < PLACEHOLDER_LIMIT / 100, (
+        f"y축이 {info['range']} 까지 늘어났습니다 (타점 최대 {info['top']})"
+    )
 
 
 def test_only_the_background_is_thinned(wac_page):
