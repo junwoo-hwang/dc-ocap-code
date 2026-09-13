@@ -8,6 +8,7 @@ import gzip
 import json
 import re
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -79,6 +80,76 @@ def test_check_data_blocks_a_wiring_mistake(frames):
     wrong = {p: df.assign(root_lot_id="NOSUCHLOT") for p, df in dc.items()}
     problems, _warnings = app.check_data(wrong, trend, spec, split)
     assert any("하나도 매칭되지 않습니다" in p for p in problems), problems
+
+
+# --------------------------------------- JSON 으로 내보낼 수 있는 값인가
+
+def test_infinity_is_sent_as_missing_not_as_infinity(frames):
+    """inf 셀 하나가 리포트 전체를 못 열게 만들던 것.
+
+    json.dumps 는 inf 를 `Infinity` 라고 적는데 그건 JSON 이 아니라서,
+    브라우저의 JSON.parse 가 거기서 멈춘다 -- 차트 하나가 아니라 페이지가
+    통째로 "데이터를 읽는 중 오류" 한 줄이 된다.
+    """
+    assert app._clean(float("inf")) is None
+    assert app._clean(float("-inf")) is None
+    assert app._clean(np.float64("inf")) is None
+    assert app._clean(1.5) == 1.5 and app._clean(0.0) == 0.0
+
+    trend = frames[1]["ULY"].copy()
+    item = app.item_columns(trend)[0]
+    trend.loc[trend.index[0], item] = float("inf")
+    dumped = json.dumps(app._columns(trend))
+    assert "Infinity" not in dumped
+    json.loads(dumped)                     # 브라우저가 하는 일과 같다
+
+
+def test_duplicate_columns_are_refused_instead_of_exported_as_their_own_names(frames):
+    """df["a"] 가 칸 두 개를 가리키면 Series 가 아니라 DataFrame 이라,
+    값 대신 칸 이름이 실린 리포트가 오류 없이 만들어진다."""
+    df = pd.DataFrame([[1, 2, 3]], columns=["a", "b", "a"])
+    with pytest.raises(app.BuildError) as err:
+        app._columns(df)
+    assert "a" in str(err.value)
+
+    dc, trend, spec, split = frames
+    doubled = dict(trend)
+    item = app.item_columns(trend["ULY"])[0]
+    doubled["ULY"] = pd.concat([trend["ULY"], trend["ULY"][[item]]], axis=1)
+    problems, _warnings = app.check_data(dc, doubled, spec, split)
+    assert any("겹치는 칸" in p for p in problems), problems
+
+
+# ------------------------------------------------------- 정규화 규칙
+
+@pytest.mark.parametrize("value", [3, 3.0, "3", "03", " 3 ", "3.0"])
+def test_wafer_ids_normalize_to_the_same_number_whatever_the_dtype(value):
+    """trend 는 wafer_id 를 float 로, dc 는 int 로 주는 일이 흔하다.
+
+    예전에는 3.0 만 문자열 "3.0" 으로 남아서, 그 둘이 한 쌍도 안 맞고
+    check_data 가 "하나도 매칭되지 않습니다" 로 빌드를 멈춰 세웠다.
+    """
+    assert app.norm_wafer(value) == 3
+
+
+def test_a_float_wafer_column_does_not_block_the_build(frames):
+    dc, trend, spec, split = frames
+    floated = dict(trend)
+    floated["ULY"] = trend["ULY"].assign(
+        wafer_id=pd.to_numeric(trend["ULY"]["wafer_id"], errors="coerce").astype(float))
+    problems, _warnings = app.check_data(dc, floated, spec, split)
+    assert not any("매칭되지 않습니다" in p for p in problems), problems
+
+
+def test_limit_columns_left_in_trend_are_not_counted_as_items():
+    """예전 구조(trend 안에 item1_ucl) 로 뽑힌 trend 가 섞여 들어와도
+    차트가 다섯 배로 늘지 않아야 한다."""
+    cols = app.META_TREND_COLS + ["item1", "item1_ucl", "item1_lcl",
+                                  "item1_usl", "item1_lsl", "leak_usl"]
+    got = app.item_columns(pd.DataFrame(columns=cols))
+    assert got == ["item1", "leak_usl"], (
+        "item1_* 는 빼되, 짝이 되는 item 이 없는 leak_usl 은 진짜 item 이다"
+    )
 
 
 # ------------------------------------------------- 자리표시자 관리선
@@ -265,6 +336,45 @@ def test_hold_view_excludes_lots_that_already_flowed(frames):
     dc.loc[:, ["owner", "code", "comment"]] = None
     dc.loc[:, "status"] = "Run"
     assert app.filter_by_status(dc, "hold").empty
+
+
+def test_a_lower_rw_cnt_moves_to_the_history_list(frames):
+    """rework 로 다시 걸리면 앞 건은 끝난 것이다.
+
+    이 규칙이 브라우저에만 있어서, diagnose.py 가 알려주는 hold 건수가
+    화면에 보이는 것보다 많았다.
+    """
+    dc = frames[0]["ULY"].iloc[:1].copy()
+    base = dc.iloc[0].to_dict()
+    rows = []
+    for rw in (0, 1, 2):
+        r = dict(base, rw_cnt=rw, code=None, owner=None, comment=None, status="Hold")
+        rows.append(r)
+    dc = pd.DataFrame(rows)
+    held = app.filter_by_status(dc, "hold")
+    assert list(held["rw_cnt"]) == [2], "가장 높은 rw_cnt 만 열려 있어야 한다"
+    assert sorted(app.filter_by_status(dc, "이력")["rw_cnt"]) == [0, 1]
+
+
+def test_an_unreadable_rw_cnt_is_neither_pushed_nor_pushes(frames):
+    """rw_cnt 를 못 읽는 줄은 순서를 매길 수 없으니 건드리지 않는다."""
+    base = frames[0]["ULY"].iloc[0].to_dict()
+    dc = pd.DataFrame([
+        dict(base, rw_cnt=None, code=None, owner=None, status="Hold"),
+        dict(base, rw_cnt=5, code=None, owner=None, status="Hold"),
+    ])
+    assert len(app.filter_by_status(dc, "hold")) == 2
+
+
+def test_one_dispositioned_item_does_not_split_an_event_across_both_lists(frames):
+    """한 건 안에서 item 별로 조치가 갈려도 hold 와 이력 양쪽에 뜨면 안 된다."""
+    base = frames[0]["ULY"].iloc[0].to_dict()
+    dc = pd.DataFrame([
+        dict(base, rw_cnt=0, item_id="item1", code=None, owner=None, status="Hold"),
+        dict(base, rw_cnt=0, item_id="item2", code="C1", owner="kim", status="Hold"),
+    ])
+    hold, hist = app.filter_by_status(dc, "hold"), app.filter_by_status(dc, "이력")
+    assert len(hold) == 2 and len(hist) == 0
 
 
 def test_group_holds_keeps_a_rework_separate(frames):

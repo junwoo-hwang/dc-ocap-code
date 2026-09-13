@@ -581,9 +581,13 @@ TREND_REQUIRED = [
 GROUP_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"]
 
 
-# Limits live in trend next to the measurement, as item1_ucl / item1_usl /
-# ... beside item1, because the spec in force changes over time and each row
-# has to carry the one that applied when that wafer came out of test.
+# 관리선은 spec 프레임에 (item_id, from_time) 개정 이력으로 온다. 규격이
+# 시점에 따라 바뀌므로 한 벌을 차트 전체에 쓰지 않고, 타점마다 그때 유효했던
+# 개정을 찾아 쓴다 (템플릿의 limitsAt).
+#
+# 예전 구조는 trend 안에 item1 옆에 item1_ucl / item1_usl 로 붙여 오는
+# 것이었다. 그렇게 뽑힌 trend 가 아직 섞여 들어올 수 있어서 item_columns()
+# 가 그런 칸을 item 으로 세지 않도록 걸러낸다.
 LIMIT_COLS = ("ucl", "lcl", "usl", "lsl")
 SPEC_REQUIRED = ["item_id", "from_time", *LIMIT_COLS]
 # trend's own columns, everything else is either an item or one of its limits
@@ -675,8 +679,22 @@ def shared_constants_js() -> str:
 
 
 def item_columns(trend_df) -> list:
-    """The measurement columns of a trend frame (everything but its metadata)."""
-    return [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
+    """The measurement columns of a trend frame (everything but its metadata).
+
+    관리선 칸(item1_ucl 처럼 item 이름 뒤에 _ucl/_lcl/_usl/_lsl 이 붙은 것)은
+    item 이 아니다. 관리선은 이제 spec 프레임에 개정 이력으로 오지만, 예전
+    구조로 뽑은 trend 에는 아직 측정값 옆에 그대로 붙어 온다. 그걸 item 으로
+    세면 WAC 페이지에 차트가 다섯 배로 늘고, OCAP TOP5 도 관리선 이름으로
+    채워진다 -- 오류는 하나도 안 난다.
+
+    같은 이름의 item 칸이 실제로 있을 때만 뺀다. "leak_usl" 처럼 진짜 item
+    이름이 우연히 그렇게 끝나는 경우를 지우지 않기 위해서다.
+    """
+    names = {str(c) for c in trend_df.columns}
+    items = [c for c in trend_df.columns if str(c) not in META_TREND_COLS]
+    return [c for c in items
+            if not any(str(c).lower().endswith(f"_{w}") and str(c)[:-(len(w) + 1)] in names
+                       for w in LIMIT_COLS)]
 
 
 
@@ -723,6 +741,18 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
     따로 세어 경고합니다.
 
     status 컬럼이 없는 dc 도 그대로 동작하도록, 없으면 1번만 봅니다.
+
+    3) 그 lot 에서 더 높은 rw_cnt 가 나오지 않았을 것. rework 로 다시 걸리면
+       앞 건은 끝난 것입니다 (0 이 있다가 1 이 생기면 0 은 이력으로).
+       rw_cnt 를 못 읽는 줄은 순서를 매길 수 없으므로 건드리지 않습니다 --
+       밀어내지도, 밀려나지도 않습니다.
+
+    판정은 줄이 아니라 hold 건(lot_id, rw_cnt) 단위입니다. 줄 단위로 가르면
+    한 건 안에서 item 별로 조치가 갈렸을 때 그 건이 hold 와 이력 양쪽에 다
+    뜹니다. 한 줄이라도 조치가 안 됐으면 그 건은 열려 있는 것으로 봅니다.
+
+    이 규칙은 dc_ocap_template.html 의 filterByStatus 와 글자 그대로 같아야
+    합니다 (tests/test_report_page.py 가 같은 데이터로 둘을 맞춰 봅니다).
     """
     if dc_df.empty or view == "전체":
         return dc_df
@@ -732,7 +762,22 @@ def filter_by_status(dc_df: pd.DataFrame, view: str) -> pd.DataFrame:
     if "status" in dc_df.columns:
         # astype(str) 이 NaN 을 "nan" 으로 바꾸므로 결측도 자연히 탈락한다
         undispositioned &= dc_df["status"].astype(str).str.strip().eq("Hold")
-    return dc_df[undispositioned] if view == "hold" else dc_df[~undispositioned]
+
+    lots = dc_df["lot_id"].astype(str)
+    if "rw_cnt" in dc_df.columns:
+        rw = pd.to_numeric(dc_df["rw_cnt"].map(norm_rw_cnt), errors="coerce")
+        # 그 lot 의 최대 rw_cnt. NaN 은 groupby 가 알아서 빼 준다
+        latest = rw.groupby(lots).transform("max")
+        superseded = rw.notna() & latest.notna() & (rw < latest)
+        undispositioned &= ~superseded
+        event = lots + "||" + dc_df["rw_cnt"].map(norm_rw_cnt)
+    else:
+        event = lots
+
+    # 건 단위로 올린다: 한 줄이라도 열려 있으면 그 건의 모든 줄이 hold 다
+    open_events = set(event[undispositioned])
+    is_open = event.isin(open_events)
+    return dc_df[is_open] if view == "hold" else dc_df[~is_open]
 
 
 
@@ -796,11 +841,24 @@ def norm_wafer(value):
     dc may store it zero-padded as text or category ("03") while the
     trend table has a plain int (3), so both are reduced to an int where
     possible and to trimmed text otherwise.
+
+    3.0 도 3 이다. 여기가 브라우저(normWafer)와 갈라져 있었다: 자바스크립트는
+    수를 하나로만 다뤄서 String(3.0) 이 "3" 이라 3 이 되는데, 파이썬은
+    str(3.0) 이 "3.0" 이라 int() 가 실패해 문자열 "3.0" 으로 남았다. 그래서
+    trend 의 wafer_id 가 float 로 오면(merge 한 번에 그렇게 된다) check_data 가
+    dc 와 한 쌍도 못 맞추고 "하나도 매칭되지 않습니다" 로 빌드를 멈춰 세웠다 --
+    정작 화면은 멀쩡히 그렸을 데이터인데.
     """
+    text = str(value).strip()
     try:
-        return int(str(value).strip())
+        return int(text)
     except (TypeError, ValueError):
-        return str(value).strip()
+        pass
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    return int(number) if number.is_integer() else text
 
 
 def norm_rw_cnt(value) -> str:
@@ -937,9 +995,9 @@ def check_data(product_dc: dict, trend_frames: dict,
 
     Runs on the real data the first time it is plugged in, so a schema
     mismatch reads as a plain list of what to fix instead of a KeyError.
-    Called from inside the cached load_data(), because scanning full
-    trend tables on every rerun would cost more than the checks are
-    worth (~0.8s per click on 200k rows).
+    build_dc_ocap_html() 이 그리기 전에 한 번 부른다. 여기서 걸러야
+    하는 것은 '오류 없이 틀리는' 부류다 -- 컬럼 이름이 하나 어긋났거나
+    제품을 잘못 짝지었을 때, 화면은 아무 말 없이 빈 차트를 그린다.
 
     The split matters: only things that actually stop the dashboard from
     working belong in `fatal`, because the caller refuses to render on
@@ -955,18 +1013,38 @@ def check_data(product_dc: dict, trend_frames: dict,
     for product in product_dc:
         dc_df, trend_df = product_dc[product], trend_frames[product]
 
+        duplicated_cols = False
         for label, df, required in (
             (f"{product.lower()}_dc", dc_df, DC_REQUIRED),
             (f"{product.lower()}_trend", trend_df, TREND_REQUIRED),
+            (f"{product.lower()}_spec", (spec_frames or {}).get(product), None),
+            (f"{product.lower()}_split", (split_frames or {}).get(product), None),
         ):
             if not isinstance(df, pd.DataFrame):
-                problems.append(f"{label}: DataFrame 이 아닙니다 ({type(df).__name__}).")
+                if required is not None:      # spec/split 은 아래에서 따로 본다
+                    problems.append(f"{label}: DataFrame 이 아닙니다 ({type(df).__name__}).")
                 continue
-            missing = [c for c in required if c not in df.columns]
-            if missing:
-                problems.append(f"{label}: 컬럼 없음 -> {', '.join(missing)}")
+            if required is not None:
+                missing = [c for c in required if c not in df.columns]
+                if missing:
+                    problems.append(f"{label}: 컬럼 없음 -> {', '.join(missing)}")
+            # 이름이 겹치는 칸: df["a"] 가 Series 가 아니라 DataFrame 이 되어,
+            # 내보낼 때 값 대신 칸 이름이 실린다 (오류는 안 난다)
+            dupes = [str(c) for c in df.columns[df.columns.duplicated()].unique()]
+            if dupes:
+                duplicated_cols = True
+                problems.append(
+                    f"{label}: 이름이 겹치는 칸 -> {', '.join(dupes[:6])}"
+                    + (" ..." if len(dupes) > 6 else "")
+                    + ". 그 칸의 값이 전부 칸 이름으로 바뀝니다."
+                )
 
         if not isinstance(dc_df, pd.DataFrame) or not isinstance(trend_df, pd.DataFrame):
+            continue
+        # 겹치는 칸이 있으면 아래 검사들은 못 돈다 -- df[col] 이 2차원이라
+        # to_numeric/to_datetime 이 그 자리에서 TypeError 로 죽는다. 진단이
+        # 진단하려던 데이터 때문에 죽으면 무엇이 문제인지도 못 알려준다.
+        if duplicated_cols:
             continue
 
         # NAT_RATIO_LIMIT: pd.to_datetime(errors="coerce") turns anything it
@@ -1131,11 +1209,10 @@ def frames_by_product(frames) -> tuple[dict, dict, dict, dict]:
 
     순서로 받은 걸 이름으로 바꾸는 자리는 여기 하나뿐이다. 여러 군데서
     각자 풀면 한 곳만 순서를 잘못 적어도 조용히 다른 제품 데이터를 그리게
-    된다. load_data() 가 뒤에 붙이는 loaded_at/problems/warnings 도 그대로
-    넘길 수 있도록 남는 건 무시한다.
+    된다. 뒤에 뭐가 더 붙어 와도(진단 스크립트가 시각이나 경고를 이어
+    붙인다) 앞 열두 개만 읽고 남는 건 무시한다.
 
-    split 은 아직 화면에서 읽는 데가 없다. 그래도 여기서 같이 이름을
-    붙여 두는 이유는, 나중에 쓸 때 다른 데서 순서로 풀지 않게 하려는 것이다.
+    split 은 차트 밑 EINECN 버튼이 (제품, root_lot_id) 로 읽는다.
     """
     (uly_dc, sol_dc, tts_dc, uly_trend, sol_trend, tts_trend,
      uly_spec, sol_spec, tts_spec, uly_split, sol_split, tts_split,
@@ -1191,7 +1268,13 @@ class BuildError(Exception):
 def _clean(value):
     """One cell -> a JSON-safe value: NaN/NaT -> None, Timestamp -> ISO
     string, numpy scalar -> native Python (json.dumps chokes on numpy
-    int64/float64)."""
+    int64/float64).
+
+    inf 도 None 으로 보낸다. json.dumps 는 그걸 `Infinity` 라고 적는데
+    그건 JSON 이 아니다 -- 브라우저의 JSON.parse 가 거기서 멈춰서, 셀 하나
+    때문에 리포트 전체가 "데이터를 읽는 중 오류" 한 줄로 끝난다. 측정값도
+    관리선도 inf 는 값이 아니라 계측 실패이므로 결측으로 보내는 게 맞다.
+    """
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     if value is None:
@@ -1204,7 +1287,9 @@ def _clean(value):
     if isinstance(value, np.integer):
         return int(value)
     if isinstance(value, np.floating):
-        return float(value)
+        value = float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 
@@ -1215,7 +1300,21 @@ def _columns(df: pd.DataFrame) -> dict:
     is most of the file. Column-shaped JSON writes each name once; the
     template expands it back into per-row objects client-side (see
     expandColumnar() in dc_ocap_template.html), so nothing downstream of
-    that expansion has to change."""
+    that expansion has to change.
+
+    이름이 겹치는 칸이 있으면 멈춘다. pandas 는 df["a"] 가 칸 두 개를
+    가리키면 Series 가 아니라 DataFrame 을 돌려주고, 그걸 for 로 돌면
+    값이 아니라 '칸 이름' 이 나온다 -- 그대로 내보내면 그 칸이 통째로
+    "a", "a", "a" ... 로 채워진 리포트가 오류 하나 없이 만들어진다.
+    """
+    dupes = [str(c) for c in df.columns[df.columns.duplicated()].unique()]
+    if dupes:
+        raise BuildError(
+            f"이름이 겹치는 칸이 있습니다 -> {dupes[:6]}"
+            + (" ..." if len(dupes) > 6 else "")
+            + ". 그대로 내보내면 그 칸의 값이 전부 칸 이름으로 바뀝니다 "
+            "(오류 없이). pivot 결과라면 columns 를 확인하세요."
+        )
     return {col: [_clean(v) for v in df[col]] for col in df.columns}
 
 

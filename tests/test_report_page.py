@@ -6,6 +6,7 @@
 
     pip install playwright && playwright install chromium
 """
+import json
 import os
 
 import numpy as np
@@ -377,6 +378,130 @@ def test_a_placeholder_limit_never_stretches_the_y_axis(wac_page):
     )
 
 
+def test_the_trend_chart_click_survives_a_purge(wac_page):
+    """trend 컬럼이 없는 item 을 한 번 보면 Plotly.purge 가 돈다.
+
+    purge 는 차트뿐 아니라 그 element 의 plotly 이벤트 발신기까지 지운다.
+    "한 번만 건다" 를 플래그로 기억하고 있으면 다시 걸지 않아서, 그 뒤로는
+    차트 타점을 눌러도 아무 일도 안 일어난다 (오류조차 안 난다).
+    """
+    page, _planted, _traces, _errors = wac_page
+    page.evaluate("""() => {
+      state.page = 'dcocap';
+      document.getElementById('pageDcOcap').hidden = false;
+      document.getElementById('pageWac').hidden = true;
+      state.selectedLotId = null; state.selectedRwCnt = null;
+      renderAll();
+    }""")
+    page.wait_for_timeout(800)
+    page.click("#listBody tr")
+    page.wait_for_timeout(1200)
+
+    def click_listeners():
+        return page.evaluate("""() => {
+          const gd = document.getElementById('chartDiv');
+          const ev = gd && gd._ev && gd._ev._events;
+          const h = ev && ev['plotly_click'];
+          return !h ? 0 : (Array.isArray(h) ? h.length : 1);
+        }""")
+
+    assert click_listeners() == 1, "처음부터 안 걸려 있으면 이 검사는 뜻이 없다"
+    page.evaluate("() => Plotly.purge('chartDiv')")
+    assert click_listeners() == 0, "purge 가 발신기를 지우는 게 이 결함의 전제다"
+    page.evaluate("() => renderAll()")
+    page.wait_for_timeout(1200)
+    assert click_listeners() == 1, "다시 그린 뒤에도 클릭이 죽어 있습니다"
+
+    page.evaluate("""() => {
+      state.page = 'wac';
+      document.getElementById('pageDcOcap').hidden = true;
+      document.getElementById('pageWac').hidden = false;
+    }""")
+
+
+def test_hover_width_counts_escaped_characters(wac_page):
+    """hover 는 HTML 이라 "<" 는 "&lt;" 네 칸으로 그려진다.
+
+    원문 기준으로 재면 부등호가 섞인 코멘트에서 상자가 기준보다 넓어져
+    가리키던 타점을 덮는다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    got = page.evaluate("""() => ({
+      plain: clipToWidth('abcdefghij', 6),
+      angle: clipToWidth('<<<<<<', 9),
+      width: drawnWidth('a<b'),
+    })""")
+    assert got["width"] == 1 + 4 + 1
+    assert got["plain"] == "abcde…"
+    # "<" 하나가 4 칸이므로 8칸(=2개)까지만 들어가고 "…" 자리가 남는다
+    assert got["angle"] == "<<…"
+
+
+def test_typing_in_the_search_box_rebuilds_the_grid_once(wac_page):
+    """renderWac 은 그려둔 차트를 전부 purge 하고 그리드를 새로 만든다.
+
+    글자마다 부르면 "item" 네 글자에 네 번 벌어진다. 한 박자 모았다가
+    한 번만 그려야 한다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    page.fill("#wacSearch", "")
+    page.wait_for_timeout(1200)
+    page.evaluate("""() => {
+      window.__wacCalls = 0;
+      const orig = renderWac;
+      renderWac = (...a) => { window.__wacCalls += 1; return orig(...a); };
+      window.__restoreWac = () => { renderWac = orig; };
+    }""")
+    page.type("#wacSearch", "item", delay=40)
+    page.wait_for_timeout(1500)
+    calls = page.evaluate("() => window.__wacCalls")
+    page.evaluate("() => window.__restoreWac()")
+    assert page.eval_on_selector_all(".wac-chart", "d => d.length") > 0, (
+        "검색 결과가 없으면 이 검사는 뜻이 없다")
+    assert calls == 1, f"네 글자를 쳤는데 그리드를 {calls}번 새로 만들었습니다"
+
+
+def test_typing_in_the_search_box_leaves_the_stat_charts_alone(wac_page):
+    """통계 칸은 제품에만 달려 있다. 검색어가 바뀌었다고 다시 그릴 이유가 없다.
+
+    다시 그리면 plotly 차트 네 개를 지웠다 만드는 일이 검색할 때마다 붙는다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    page.fill("#wacSearch", "")
+    page.wait_for_timeout(1200)
+    # purge -> react 를 거치면 svg 노드가 새로 생긴다. 그대로면 안 건드린 것이다.
+    page.evaluate("() => { window.__svg = document.querySelector('#wacStatMonth svg'); }")
+    assert page.evaluate("() => !!window.__svg"), "월별 통계 차트가 없습니다"
+    page.type("#wacSearch", "item", delay=40)
+    page.wait_for_timeout(1500)
+    same = page.evaluate("() => document.querySelector('#wacStatMonth svg') === window.__svg")
+    assert same, "검색만 바뀌었는데 통계 차트를 다시 그렸습니다"
+
+    # 제품이 바뀌면 반드시 다시 그려야 한다 -- 가드가 너무 세면 옛 제품
+    # 통계가 그대로 남는다
+    page.evaluate("() => { state.product = 'TTS'; renderWac(); }")
+    page.wait_for_timeout(1500)
+    assert not page.evaluate(
+        "() => document.querySelector('#wacStatMonth svg') === window.__svg"), (
+        "제품을 바꿨는데 통계가 그대로입니다")
+
+
+def test_a_malformed_hold_time_does_not_invent_a_month(wac_page):
+    """달은 hold_time 앞 7글자다. 길이만 보면 "2026-8-" 도 통과해서,
+    월별 통계에 있지도 않은 달이 하나 더 생긴다."""
+    page, _planted, _traces, _errors = wac_page
+    months = page.evaluate("""() => {
+      const orig = DATA.dc.ULY;
+      DATA.dc.ULY = [
+        { ...orig[0], lot_id: 'A', hold_time: '2026-08-30T01:00:00' },
+        { ...orig[0], lot_id: 'B', hold_time: '2026-8-3 01:00:00' },
+        { ...orig[0], lot_id: 'C', hold_time: '' },
+      ];
+      try { return wacStats('ULY').months; } finally { DATA.dc.ULY = orig; }
+    }""")
+    assert months == ["2026-08"], months
+
+
 def test_only_the_background_is_thinned(wac_page):
     """회색은 솎되 CL OUT / SL OUT 은 하나도 솎지 않는다 -- 그게 신호다."""
     _page, planted, traces_for, _errors = wac_page
@@ -462,6 +587,25 @@ def test_the_whole_list_view_is_untouched(wac_page):
     page, _planted, _traces, _errors = wac_page
     rows = [_row("A.1", 0), _row("A.1", 1), _row("B.1", 0, code="Flow", owner="김")]
     assert len(_filter(page, rows, "전체")) == 3
+
+
+@pytest.mark.parametrize("view", ["hold", "이력", "전체"])
+def test_python_and_the_browser_split_the_list_the_same_way(wac_page, view):
+    """같은 규칙이 두 파일에 손으로 적혀 있다 -- 실제로 한쪽만 고쳐서 갈렸다.
+
+    (승계 규칙이 템플릿에만 들어가는 바람에, diagnose.py 가 알려주는
+    hold 건수가 화면에 보이는 것보다 많았다.)
+    """
+    page, _planted, _traces, _errors = wac_page
+    frames = app.frames_by_product(app.pull_data())
+    for product in ("ULY", "TTS", "SOL"):
+        dc = frames[0][product]
+        rows = json.loads(dc.to_json(orient="records", date_format="iso"))
+        js = sorted(_filter(page, rows, view))
+        py = app.filter_by_status(dc, view)
+        want = sorted({f"{r.lot_id}|{app.norm_rw_cnt(r.rw_cnt)}"
+                       for r in py.itertuples()})
+        assert js == want, f"{product}/{view}: 브라우저와 파이썬이 다릅니다"
 
 
 # --------------------------------------------- 타점 선택 (진짜 마우스로)

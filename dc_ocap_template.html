@@ -605,9 +605,14 @@ const LIST_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_in
 // ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
 function normLot(v) { return String(v).trim(); }
 
+// app.py 의 norm_wafer 와 같은 규칙이어야 한다. "3.0" 도 3 으로 본다 --
+// dc 는 wafer_id 를 문자열로, trend 는 수로 주는 일이 흔해서, 여기가 갈리면
+// hold 가 차트에 빨간 점으로 안 찍히는데 화면에는 아무 오류도 안 뜬다.
 function normWafer(v) {
   const s = String(v).trim();
-  return /^-?\d+$/.test(s) ? parseInt(s, 10) : s;
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  const n = Number(s);
+  return (s !== "" && Number.isInteger(n)) ? n : s;
 }
 
 // mirrors norm_rw_cnt() in app.py: the list groups on (lot_id, rw_cnt) and
@@ -966,7 +971,6 @@ const detailPanel = document.getElementById("detailPanel");
 const trendPanel = document.getElementById("trendPanel");
 const commentPanel = document.getElementById("commentPanel");
 
-let chartClickBound = false;
 
 function renderFilterButtons() {
   document.querySelectorAll("#statusFilter button").forEach(b => {
@@ -1099,10 +1103,6 @@ function renderDetail(dcAll) {
 function ensureTrendSkeleton() {
   if (document.getElementById("navRow")) return;
   trendPanel.innerHTML = "";
-  // the old chartDiv (and its bound plotly_click listener) was just wiped
-  // out with it -- the next chart render needs to bind a fresh one to the
-  // element about to be created below, or clicks on it silently do nothing
-  chartClickBound = false;
   const navRow = el("div", { class: "nav-row", id: "navRow" });
   const prevBtn = el("button", { class: "nav-arrow", id: "prevBtn", text: "◀" });
   const itemLabel = el("div", { class: "item-label", id: "itemLabel" });
@@ -1427,14 +1427,20 @@ function renderTrendAndComment(dcAll, dcFiltered) {
       warningBox.appendChild(el("div", { class: "warning-box", text: `${itemId} 은(는) 이 제품 trend 에 측정값이 없습니다.` }));
     }
     Plotly.react("chartDiv", traces, layout, { displayModeBar: true, responsive: true });
-    bindReverseDragReset(document.getElementById("chartDiv"));
-    if (!chartClickBound) {
-      document.getElementById("chartDiv").on("plotly_click", (ev) => {
+    const gd = document.getElementById("chartDiv");
+    bindReverseDragReset(gd);
+    // 플래그 하나로 "한 번만 건다" 를 하면 안 된다. 바로 위 분기의
+    // Plotly.purge 는 차트뿐 아니라 이 element 의 이벤트 발신기(_ev)까지
+    // 통째로 지우는데, 플래그는 그대로 true 로 남는다. 그래서 trend 컬럼이
+    // 없는 item 을 한 번 보고 나면, 그 뒤로는 차트 타점을 눌러도 아무 일도
+    // 안 일어난다 (오류도 안 난다). 발신기가 갈렸는지를 보고 다시 건다.
+    if (gd._dcClickOn !== gd._ev) {
+      gd._dcClickOn = gd._ev;
+      gd.on("plotly_click", (ev) => {
         const pt = ev.points && ev.points[0];
         if (!pt || !pt.customdata) return;
         handleChartClick(pt.customdata[0], pt.customdata[1], state.currentItemId);
       });
-      chartClickBound = true;
     }
     chartCaption.textContent = `제품: ${state.product} · lot_id: ${lotId} · wafer_id: ${waferList} · item: ${itemId}`;
   }
@@ -1487,6 +1493,11 @@ const WAC_NO_HOLD = "(hold 이력 없음)";
 // comment 가 서너 글자에서 잘려 아무 쓸모가 없다.
 const WAC_HOVER_MIN_CHARS = 24;
 
+// 검색 입력을 이만큼 모았다가 한 번만 다시 그린다. renderWac 은 그려둔 차트를
+// 전부 purge 하고 그리드를 새로 만드는 일이라 글자마다 하면 입력이 밀린다.
+const WAC_SEARCH_DEBOUNCE_MS = 250;
+let _wacSearchTimer = null;
+
 // 글자 수가 아니라 '보이는 폭' 으로 잰다. 한글/한자는 라틴 문자의 두 배 폭이라,
 // 글자 수로 자르면 owner 줄에 맞췄다고 해도 상자 너비가 안 맞는다.
 //
@@ -1511,11 +1522,26 @@ function displayWidth(text) {
   return w;
 }
 
+// 자를 때 재는 폭은 '화면에 그려질 폭' 이어야 한다. hover 는 HTML 이라
+// "<" 한 글자가 "&lt;" 네 칸으로 그려지므로, 원문 기준으로 재면 부등호가
+// 섞인 코멘트에서 상자가 기준보다 넓어져 타점을 덮는다.
+function charWidth(ch) {
+  if (ch === "&") return 5;                  // &amp;
+  if (ch === "<" || ch === ">") return 4;    // &lt; / &gt;
+  return isWideChar(ch.codePointAt(0)) ? 2 : 1;
+}
+
+function drawnWidth(text) {
+  let w = 0;
+  for (const ch of String(text)) w += charWidth(ch);
+  return w;
+}
+
 function clipToWidth(text, limit) {
-  if (displayWidth(text) <= limit) return text;
+  if (drawnWidth(text) <= limit) return text;
   let out = "", w = 0;
   for (const ch of String(text)) {
-    const cw = isWideChar(ch.codePointAt(0)) ? 2 : 1;
+    const cw = charWidth(ch);
     if (w + cw > limit - 1) break;           // 1 칸은 "…" 자리로 남긴다
     out += ch; w += cw;
   }
@@ -1563,7 +1589,7 @@ function wacDispo(product, itemCol) {
   for (const [k, b] of acc) {
     const owner = `owner : ${join(b.owner)}`;
     const code = `code : ${join(b.code)}`;
-    const cap = Math.max(displayWidth(owner), displayWidth(code), WAC_HOVER_MIN_CHARS);
+    const cap = Math.max(drawnWidth(owner), drawnWidth(code), WAC_HOVER_MIN_CHARS);
     const comment = clipToWidth(`comment : ${join(b.comment)}`, cap);
     // 안내는 팝업이 실제로 열릴 때만 붙인다. comment 도 owner 도 없으면
     // 눌러도 팝업이 안 뜨므로(wacHasDispo), 그때 안내를 달면 거짓말이 된다.
@@ -2026,7 +2052,8 @@ function wacStats(product) {
   };
   for (const r of (DATA.dc[product] || [])) {
     const month = String(r.hold_time || "").slice(0, 7);
-    if (month.length !== 7) continue;          // hold_time 이 비었거나 이상한 행
+    // 길이만 보면 "2026-8-" 같은 조각도 통과해서 없는 달이 하나 생긴다
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;   // hold_time 이 비었거나 이상한 행
     const lot = String(r.lot_id);
     const item = resolveItem(r.item_id);
     add(monthLots, month, lot);
@@ -2384,7 +2411,13 @@ function openWacDispoModal(itemCol, lot, wafer, records) {
   document.getElementById("wacModal").hidden = false;
 }
 
+// 통계 칸은 제품에만 달려 있다. 검색어나 선택이 바뀌었다고 다시 그리면
+// 글자 하나 칠 때마다 plotly 차트 네 개를 지웠다 다시 그리게 된다.
+let _wacStatsFor = null;
+
 function renderWacStats() {
+  if (_wacStatsFor === state.product) return;
+  _wacStatsFor = state.product;
   const s = wacStats(state.product);
   // 제품을 바꿀 때마다 남은 차트를 반드시 걷어낸다 (WAC 그리드와 같은 이유:
   // 노드만 비우면 plotly 가 window 에 건 resize 핸들러가 남는다)
@@ -2525,6 +2558,9 @@ function renderWacFilterChip(shown) {
 }
 
 function renderWac() {
+  // 아직 안 터진 검색 타이머가 있으면 여기서 접는다. 통계 칸을 눌러
+  // 검색을 지웠는데 조금 뒤에 방금 친 글자가 되살아나는 일을 막는다.
+  clearTimeout(_wacSearchTimer);
   renderWacStats();
   document.getElementById("wacCounts").innerHTML =
     "WAC item 수<br>" + Object.keys(DATA.trend)
@@ -2718,9 +2754,16 @@ wacLegendAll.addEventListener("change", () => {
   state.wacLegendByItem = {};
   renderWac();
 });
+// 검색은 한 박자 늦춘다. renderWac 은 그려둔 차트를 전부 purge 하고 그리드를
+// 새로 만드는 일이라, 글자마다 부르면 "item12" 여섯 글자에 여섯 번 벌어진다.
 document.getElementById("wacSearch").addEventListener("input", (e) => {
-  state.wacSearch = e.target.value;
-  renderWac();
+  const value = e.target.value;
+  clearTimeout(_wacSearchTimer);
+  _wacSearchTimer = setTimeout(() => {
+    if (state.wacSearch === value) return;
+    state.wacSearch = value;
+    renderWac();
+  }, WAC_SEARCH_DEBOUNCE_MS);
 });
 document.getElementById("statusFilter").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
