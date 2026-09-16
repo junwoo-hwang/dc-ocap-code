@@ -507,12 +507,12 @@ def test_charts_per_row_defaults_to_two(wac_page):
     page, _planted, _traces, _errors = wac_page
     opts = page.evaluate(
         "() => [...document.getElementById('wacPerRow').options].map(o => Number(o.value))")
-    assert opts == [2, 3, 4, 5]
+    assert opts == [2, 3, 4]
     info = _grid_info(page)
     assert info["cols"] == 2 and info["pick"] == "2"
 
 
-@pytest.mark.parametrize("n", [3, 4, 5])
+@pytest.mark.parametrize("n", [3, 4])
 def test_charts_per_row_actually_resizes_the_drawn_charts(wac_page, n):
     """격자 열 수만 바꾸면 plotly 는 옛 너비 그대로 남는다.
 
