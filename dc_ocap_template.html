@@ -127,7 +127,7 @@
   /* ---- WAC Trend 페이지 ---- */
   .wac-search { margin-bottom: 0; flex: 1; }
   .wac-stamp { font-size: 0.8rem; color: #888; text-align: right; }
-  /* 가로 2개 고정, 세로로는 item 수만큼 */
+  /* 가로 열 수는 위 '행당 chart' 고르개가 정한다(기본 2), 세로는 item 수만큼 */
   .wac-filter { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px;
                 font-size: 0.8rem; color: #1a56db; }
   .wac-filter button { font-size: 0.75rem; padding: 1px 8px; cursor: pointer;
@@ -138,7 +138,12 @@
   .wac-stat.clickable { cursor: pointer; }
   .wac-stat.clickable:hover { border-color: #94a3b8; background: #f8fafc; }
   .wac-selected { font-size: 0.85rem; color: #d33; font-weight: 600; min-height: 1.2em; }
-  .wac-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
+  /* minmax(0, 1fr) 은 1fr 의 안전한 쪽이다. 1fr 은 칸의 최소 너비가 '내용에
+     맞춰' 라서, 줄이는 쪽으로 열을 바꿀 때 안에 있던 그림이 칸을 붙잡고
+     안 줄어들 수 있다. 지금 구조에서는 1fr 로도 줄어들지만, 안 줄어드는
+     순간 가로 스크롤이 생기는 자리라 처음부터 0 을 최소로 박아 둔다. */
+  .wac-grid { display: grid; gap: 16px; margin-top: 4px;
+              grid-template-columns: repeat(var(--wac-cols, 2), minmax(0, 1fr)); }
   .wac-chart { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; }
   .wac-chart .wac-chart-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
   .wac-chart .wac-nolimit { font-size: 0.75rem; color: #b45309; margin-bottom: 2px; }
@@ -196,8 +201,9 @@
   table.wac-stats-table tr[data-item]:hover td { background: #f1f5f9; }
 
   .wac-legend-all { display: flex; justify-content: flex-end; align-items: center;
-                    gap: 6px; margin-top: 4px; font-size: 0.78rem; color: #667085; }
-  .wac-legend-all select, .wac-chart-legend {
+                    gap: 14px; margin-top: 4px; font-size: 0.78rem; color: #667085; }
+  .wac-ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .wac-legend-all select, .wac-chart-legend, #wacPerRow {
     font-size: 0.75rem; padding: 1px 4px; border: 1px solid #d0d3d9;
     border-radius: 4px; background: #fff; }
   .wac-chart-head { display: flex; align-items: center; justify-content: space-between;
@@ -394,8 +400,14 @@
         <!-- 아래 차트 전부의 legend 를 한 번에 바꾼다. 차트마다 따로 바꾸는
              것은 각 차트 제목 옆에 하나씩 더 있다. -->
         <div class="wac-legend-all">
-          <label for="wacLegendAll">전체 legend</label>
-          <select id="wacLegendAll"></select>
+          <span class="wac-ctl">
+            <label for="wacPerRow">행당 chart</label>
+            <select id="wacPerRow"></select>
+          </span>
+          <span class="wac-ctl">
+            <label for="wacLegendAll">전체 legend</label>
+            <select id="wacLegendAll"></select>
+          </span>
         </div>
       </div>
     </div>
@@ -579,6 +591,13 @@ const CATEGORY_COLORS = [
   "#7fbf7b", "#af8dc3", "#d9a441", "#2f6f4e", "#6b4f8a",
 ];
 
+// WAC 차트를 한 줄에 몇 개 놓을지. 고를 수 있는 값과 기본값.
+// 기본 2 는 원래 모양이다 -- 넓게 보려면 3~5 로 늘린다. 더 늘리지 않는 이유는
+// 1500px 화면에서 5개면 차트 하나가 280px 안팎이라, 그보다 좁아지면 x축 눈금이
+// 겹쳐서 어느 날짜인지 못 읽는다.
+const WAC_PER_ROW_OPTIONS = [2, 3, 4, 5];
+const WAC_PER_ROW_DEFAULT = 2;
+
 // ---- 화면 상태. 여기 값이 바뀌면 renderAll() 이 전부 다시 그린다 ----
 const state = {
   product: "ULY",
@@ -588,6 +607,7 @@ const state = {
   wacSearch: "",
   wacLegend: null,          // WAC 차트 전체 legend (null = 없음)
   wacLegendByItem: {},      // 차트마다 따로 고른 것이 있으면 그게 이긴다
+  wacPerRow: WAC_PER_ROW_DEFAULT,   // WAC 차트를 한 줄에 몇 개 놓을지
   selectedLotId: null,
   selectedRwCnt: null,
   itemIdxByKey: {},
@@ -2557,6 +2577,23 @@ function renderWacFilterChip(shown) {
   box.appendChild(btn);
 }
 
+// 한 줄에 몇 개를 놓을지 격자에 알리고, 이미 그려둔 차트에도 알려준다.
+//
+// 차트를 다시 만들지 않는다: 격자 열 수만 바뀌었을 뿐 데이터는 그대로라,
+// 다시 그리면 화면이 한 번 비었다 돌아오고 그려둔 20여 개를 통째로 다시
+// 만드는 값을 치르게 된다. 대신 plotly 에 크기가 바뀌었다고 알려준다 --
+// plotly 의 responsive 는 window 크기만 듣기 때문에, 격자만 바꾸면 차트는
+// 옛 너비 그대로 남아 칸 안에서 어긋난다.
+function applyWacPerRow() {
+  document.getElementById("wacGrid").style.setProperty("--wac-cols", state.wacPerRow);
+  const picker = document.getElementById("wacPerRow");
+  if (Number(picker.value) !== state.wacPerRow) picker.value = String(state.wacPerRow);
+  for (const e of wacCharts) if (e.drawn) Plotly.Plots.resize(e.div);
+  // 열이 늘면 같은 자리에 더 많은 차트가 올라온다. 새로 보이게 된 것은
+  // 아직 안 그려져 있으므로 훑어서 큐에 넣는다 (스크롤할 때와 같은 길).
+  wacSweepSoon();
+}
+
 function renderWac() {
   // 아직 안 터진 검색 타이머가 있으면 여기서 접는다. 통계 칸을 눌러
   // 검색을 지웠는데 조금 뒤에 방금 친 글자가 되살아나는 일을 막는다.
@@ -2639,6 +2676,9 @@ function renderWac() {
     wacCharts.push({ div, itemCol, groups: null,
                      drawn: false, visible: false, dirty: false });
   });
+
+  // 격자를 새로 채웠으니 열 수를 다시 걸어준다 (고르개도 같이 맞춘다)
+  applyWacPerRow();
 
   // 화면에 들어온 차트부터 그린다. 20여 개를 한꺼번에 그리면 첫 화면이
   // 그만큼 늦게 뜨는데, 정작 처음 보이는 건 두어 개뿐이다
@@ -2742,6 +2782,17 @@ document.addEventListener("keydown", (e) => {
   closeWacModal();
   closeEinModal();
 });
+// 행당 chart 수. 격자 열 수만 바뀌는 것이라 차트를 다시 만들지 않는다.
+const wacPerRowSelect = document.getElementById("wacPerRow");
+for (const n of WAC_PER_ROW_OPTIONS) {
+  wacPerRowSelect.appendChild(el("option", { value: String(n), text: `${n}개` }));
+}
+wacPerRowSelect.value = String(WAC_PER_ROW_DEFAULT);
+wacPerRowSelect.addEventListener("change", () => {
+  state.wacPerRow = Number(wacPerRowSelect.value) || WAC_PER_ROW_DEFAULT;
+  applyWacPerRow();
+});
+
 // 전체 legend: 차트마다 따로 고른 것들까지 싹 지우고 하나로 맞춘다
 const wacLegendAll = document.getElementById("wacLegendAll");
 for (const label of Object.keys(LEGEND_FIELD_OPTIONS)) {

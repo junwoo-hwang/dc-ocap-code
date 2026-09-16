@@ -149,6 +149,7 @@ def _reset(wac_page):
       closeWacModal();
       state.product = 'ULY';
       state.wacSelected = null;
+      state.wacPerRow = WAC_PER_ROW_DEFAULT;
       document.getElementById('wacSearch').value = '';
       state.wacSearch = '';
       renderAll();
@@ -484,6 +485,70 @@ def test_typing_in_the_search_box_leaves_the_stat_charts_alone(wac_page):
     assert not page.evaluate(
         "() => document.querySelector('#wacStatMonth svg') === window.__svg"), (
         "제품을 바꿨는데 통계가 그대로입니다")
+
+
+# ------------------------------------------------ 행당 chart 수
+
+def _grid_info(page):
+    return page.evaluate("""() => {
+      const g = document.getElementById('wacGrid');
+      const plot = document.querySelector('.wac-chart .js-plotly-plot');
+      const doc = document.documentElement;
+      return {
+        cols: getComputedStyle(g).gridTemplateColumns.split(' ').length,
+        pick: document.getElementById('wacPerRow').value,
+        svg: plot ? Math.round(plot.querySelector('.main-svg').getBoundingClientRect().width) : null,
+        overflow: doc.scrollWidth > doc.clientWidth,
+      };
+    }""")
+
+
+def test_charts_per_row_defaults_to_two(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    opts = page.evaluate(
+        "() => [...document.getElementById('wacPerRow').options].map(o => Number(o.value))")
+    assert opts == [2, 3, 4, 5]
+    info = _grid_info(page)
+    assert info["cols"] == 2 and info["pick"] == "2"
+
+
+@pytest.mark.parametrize("n", [3, 4, 5])
+def test_charts_per_row_actually_resizes_the_drawn_charts(wac_page, n):
+    """격자 열 수만 바꾸면 plotly 는 옛 너비 그대로 남는다.
+
+    plotly 의 responsive 는 window 크기 변화만 듣기 때문이다. 그러면 칸은
+    좁아졌는데 그림은 안 좁아져서, 차트가 칸 밖으로 삐져나오거나 옆 차트를
+    덮는다 -- 그래서 바꿀 때마다 크기가 바뀌었다고 알려줘야 한다.
+    """
+    page, _planted, _traces, _errors = wac_page
+    before = _grid_info(page)
+    page.select_option("#wacPerRow", str(n))
+    page.wait_for_timeout(1600)
+    after = _grid_info(page)
+    assert after["cols"] == n, after
+    assert after["svg"] < before["svg"], (
+        f"열을 {n}개로 늘렸는데 그림 너비가 {before['svg']} 그대로입니다")
+    assert not after["overflow"], "차트가 칸을 넘어 가로 스크롤이 생겼습니다"
+
+
+def test_changing_charts_per_row_keeps_the_selection(wac_page):
+    """열 수만 바뀐 것이라 골라둔 wafer 가 풀리면 안 된다."""
+    page, planted, _traces, _errors = wac_page
+    page.evaluate("""() => {
+      const r = wacRows(state.product, DATA.itemCols[state.product][0])[0];
+      state.wacSelected = { rootLotId: r.root_lot_id, waferId: r.wafer_id };
+      wacApplySelection();
+    }""")
+    page.wait_for_timeout(600)
+    before = page.evaluate("() => JSON.stringify(state.wacSelected)")
+    page.select_option("#wacPerRow", "4")
+    page.wait_for_timeout(1600)
+    assert page.evaluate("() => JSON.stringify(state.wacSelected)") == before
+    # 고른 타점은 커진 채로 남아 있어야 한다 (덧그림이 살아 있다는 뜻)
+    assert page.evaluate(f"""() => wacCharts.filter(e => e.drawn).some(e => {{
+      const ov = e.div.data[e.ovSel];
+      return ov && ov.x.length > 0 && ov.marker.size.some(s => s === {app.WAC_SIZE_SEL});
+    }})""")
 
 
 def test_a_malformed_hold_time_does_not_invent_a_month(wac_page):
