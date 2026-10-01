@@ -2560,8 +2560,15 @@ function renderWacStats() {
 // 차트 순서. 피벗해서 온 컬럼 순서는 대개 사전순이라 item2 가 item10 뒤로
 // 가서 뒤죽박죽으로 보인다. 숫자는 숫자로 견주고(내림차순), 그래야 30개가
 // 늘어서도 눈으로 따라갈 수 있다.
+//
+// 단, VR_QA 로 시작하는 item 은 자주 안 보므로 통째로 맨 뒤로 보낸다
+// (대소문자 무시). 그 안에서도 순서는 위와 같다.
 const _collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-function compareItemsDesc(a, b) { return _collator.compare(String(b), String(a)); }
+const WAC_LAST_PREFIX = "VR_QA";
+function isWacLastItem(c) { return String(c).trim().toUpperCase().startsWith(WAC_LAST_PREFIX); }
+function compareItemsDesc(a, b) {
+  return (isWacLastItem(a) - isWacLastItem(b)) || _collator.compare(String(b), String(a));
+}
 
 // 지금 무엇으로 좁혀져 있는지 한 줄로 보여주고, 거기서 바로 풀 수 있게 한다.
 // 이게 없으면 통계를 눌러 좁힌 뒤 원래대로 돌아갈 방법이 눈에 안 보인다.

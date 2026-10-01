@@ -487,6 +487,38 @@ def test_typing_in_the_search_box_leaves_the_stat_charts_alone(wac_page):
         "제품을 바꿨는데 통계가 그대로입니다")
 
 
+# ------------------------------------------------ 차트 순서
+
+def test_vr_qa_items_sort_after_everything_else(wac_page):
+    """VR_QA 로 시작하는 item 은 자주 안 본다. 맨 뒤로, 그 안에서도 같은 순서."""
+    page, _planted, _traces, _errors = wac_page
+    got = page.evaluate("""() => ['VR_QA_2', 'item3', 'vr_qa_10', 'item10', 'VR_QB',
+                                  ' VR_QA_1', 'xVR_QA'].sort(compareItemsDesc)""")
+    assert got == ["xVR_QA", "VR_QB", "item10", "item3",
+                   "vr_qa_10", "VR_QA_2", " VR_QA_1"]
+
+
+def test_vr_qa_charts_are_drawn_last(wac_page):
+    page, _planted, _traces, errors = wac_page
+    before = len(errors)
+    titles = page.evaluate("""() => {
+      const orig = DATA.itemCols.ULY;
+      DATA.itemCols.ULY = ['VR_QA_B', 'VR_QA_A', ...orig];
+      try {
+        renderWac();
+        return [...document.querySelectorAll('#wacGrid .wac-chart-title')]
+          .map(t => t.textContent.trim());
+      } finally {
+        DATA.itemCols.ULY = orig;
+        renderWac();
+      }
+    }""")
+    page.wait_for_timeout(1500)
+    assert titles[-2:] == ["VR_QA_B", "VR_QA_A"], titles
+    assert not any(t.startswith("VR_QA") for t in titles[:-2]), titles
+    assert errors[before:] == []
+
+
 # ------------------------------------------------ 행당 chart 수
 
 def _grid_info(page):
