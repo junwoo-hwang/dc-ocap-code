@@ -498,6 +498,19 @@ def test_vr_qa_items_sort_after_everything_else(wac_page):
                    "vr_qa_10", "VR_QA_2", " VR_QA_1"]
 
 
+# 표기가 조금 달라도 VR_QA 로 본다. 화면과 파이썬이 같은 규칙이어야 한다 --
+# 한쪽만 맞추면 '맨 뒤로는 갔는데 음수는 그대로' 같은 일이 생긴다.
+VR_QA_NAMES = ["VR_QA_1", "vr_qa_2", "VR-QA 3", "VR QA4", "ＶＲ＿ＱＡ5", "VRQA6",
+               " VR_QA7", "item1", "VR_QB", "xVR_QA", "V_R", "QA_VR"]
+
+
+def test_the_page_and_python_agree_on_what_is_vr_qa(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    got = page.evaluate("(names) => names.map(isWacLastItem)", VR_QA_NAMES)
+    assert got == [app.is_vr_qa_item(n) for n in VR_QA_NAMES]
+    assert got == [True] * 7 + [False] * 5
+
+
 def test_vr_qa_charts_are_drawn_last(wac_page):
     page, _planted, _traces, errors = wac_page
     before = len(errors)

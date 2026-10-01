@@ -690,6 +690,34 @@ def summary(product_dc):
             print(f"      {line}")
 
 
+def check_vr_qa(product_trend):
+    """VR_QA 로 시작한다고 보는 item 과, 거기 들어온 음수의 개수.
+
+    WAC Trend 에서 이 item 들은 맨 뒤로 가고, 음수는 리포트를 만들 때 절대값이
+    된다. 여기 목록에 기대한 item 이 없으면 이름 표기가 다른 것이다 (예: 앞에
+    다른 글자가 붙음) -- 그러면 맨 뒤로도 안 가고 음수도 그대로 남는다.
+    """
+    for p, df in product_trend.items():
+        if df is None or not hasattr(df, "columns"):
+            continue
+        items = [c for c in app.item_columns(df) if app.is_vr_qa_item(c)]
+        if not items:
+            print(f"   {p}: VR_QA 로 시작하는 item 없음")
+            continue
+        neg = {c: int((pd.to_numeric(df[c], errors="coerce") < 0).sum()) for c in items}
+        print(f"   {p}: VR_QA item {len(items)}개 -> WAC Trend 맨 뒤")
+        for c in items:
+            mark = f"  음수 {neg[c]}개 -> 절대값으로" if neg[c] else ""
+            print(f"      {c}{mark}")
+    others = sorted({str(c) for df in product_trend.values() if hasattr(df, "columns")
+                     for c in app.item_columns(df)
+                     if "QA" in str(c).upper() and not app.is_vr_qa_item(c)})
+    if others:
+        print("   참고: QA 가 들어가지만 VR_QA 로 '시작' 하지 않아 그대로 두는 item:")
+        for c in others[:20]:
+            print(f"      {c}")
+
+
 def main():
     head("1. pull_data() 가 무엇을 돌려줬나")
     try:
@@ -743,8 +771,11 @@ def main():
     head("8. 리스트 행을 클릭하면 우측이 뜨는가 (시뮬레이션)")
     safe("8단계", check_row_click, product_dc, product_trend)
 
-    head("9. 요약")
-    safe("9단계", summary, product_dc)
+    head("9. VR_QA item  << 맨 뒤로 보내고 음수는 절대값으로")
+    safe("9단계", check_vr_qa, product_trend)
+
+    head("10. 요약")
+    safe("10단계", summary, product_dc)
 
 
 if __name__ == "__main__":

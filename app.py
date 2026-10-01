@@ -550,7 +550,9 @@ import base64
 import gzip
 import json
 import math
+import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -656,6 +658,45 @@ OUTLIER_MIN_N = 20      # 이보다 적으면 흩어진 정도를 못 믿는다
 LIMIT_SENTINEL_MIN = 9999
 LIMIT_SENTINEL_RATIO = 1000
 
+# VR_QA 로 시작하는 item. WAC Trend 에서 맨 뒤로 보내고(자주 안 본다), 값은
+# 절대값으로 바꾼다(음수로 올라오는 것이 있는데 잘못 찍힌 값이다).
+#
+# 이름은 글자와 숫자만 남겨 대문자로 견준다: VR_QA / vr_qa / VR-QA / VR QA /
+# 전각 'ＶＲ＿ＱＡ' 가 다 같다. 표기가 조금만 달라도 안 걸려서 '고쳤는데
+# 그대로' 가 되는 일을 막는다. 화면(템플릿)도 SHARED 로 이 값을 받아 같은
+# 규칙으로 본다.
+VR_QA_KEY = "VRQA"
+
+
+def is_vr_qa_item(name) -> bool:
+    key = unicodedata.normalize("NFKC", str(name)).upper()
+    return re.sub(r"[^0-9A-Z]", "", key).startswith(VR_QA_KEY)
+
+
+def abs_vr_qa(trend_df: pd.DataFrame) -> pd.DataFrame:
+    """VR_QA 로 시작하는 item 칸의 음수를 절대값으로. 다른 칸은 그대로.
+
+    숫자로 못 읽는 값(빈 칸, 글자)은 건드리지 않는다. 원본 프레임은 고치지
+    않고 고친 사본을 준다 (고칠 것이 없으면 그대로 준다).
+    """
+    if trend_df is None or not hasattr(trend_df, "columns"):
+        return trend_df
+    out = None
+    for col in item_columns(trend_df):
+        if not is_vr_qa_item(col):
+            continue
+        num = pd.to_numeric(trend_df[col], errors="coerce")
+        neg = num < 0
+        if not neg.any():
+            continue
+        if out is None:
+            out = trend_df.copy()
+        fixed = out[col].astype(object).where(~neg, num.abs())
+        # 칸이 원래 숫자형이었으면 숫자형으로 되돌린다
+        out[col] = (pd.to_numeric(fixed, errors="coerce")
+                    if pd.api.types.is_numeric_dtype(trend_df[col]) else fixed)
+    return trend_df if out is None else out
+
 
 def shared_constants_js() -> str:
     """위 값들을 브라우저가 읽을 수 있는 한 줄짜리 JS 로 만든다."""
@@ -671,6 +712,7 @@ def shared_constants_js() -> str:
         "outlierMinN": OUTLIER_MIN_N,
         "splitWaferColumns": SPLIT_WAFER_COLUMNS,
         "limitCols": list(LIMIT_COLS),
+        "vrQaKey": VR_QA_KEY,
     }, ensure_ascii=False, separators=(",", ":")) + ";"
 
 
@@ -1218,8 +1260,11 @@ def frames_by_product(frames) -> tuple[dict, dict, dict, dict]:
      uly_spec, sol_spec, tts_spec, uly_split, sol_split, tts_split,
      *_rest) = frames
     # 순서는 화면의 제품 전환 버튼과 같게 둔다 (ULY / TTS / SOL)
+    # VR_QA item 의 음수는 여기서 한 번 절대값으로 바꾼다. 리포트를 만드는 쪽과
+    # 진단 스크립트가 다 이 길로 오므로, 차트·OUT 판정·통계가 같은 값을 본다.
     return ({"ULY": uly_dc, "TTS": tts_dc, "SOL": sol_dc},
-            {"ULY": uly_trend, "TTS": tts_trend, "SOL": sol_trend},
+            {"ULY": abs_vr_qa(uly_trend), "TTS": abs_vr_qa(tts_trend),
+             "SOL": abs_vr_qa(sol_trend)},
             {"ULY": uly_spec, "TTS": tts_spec, "SOL": sol_spec},
             {"ULY": uly_split, "TTS": tts_split, "SOL": sol_split})
 
