@@ -699,6 +699,30 @@ def test_the_whole_list_view_is_untouched(wac_page):
     assert len(_filter(page, rows, "전체")) == 3
 
 
+def test_the_hold_list_shows_lot_type_right_after_rw_cnt(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    page.click('#pageSwitch button[data-val="dcocap"]')
+    page.wait_for_selector("#listBody tr")
+    heads = page.eval_on_selector_all("#listHeaderRow th", "ths => ths.map(t => t.dataset.col)")
+    assert heads[:3] == ["rw_cnt", "lot_type", "hold_time"]
+    cells = page.eval_on_selector_all(
+        "#listBody tr:first-child td", "tds => tds.map(t => t.textContent)")
+    assert len(cells) == len(heads)
+    assert cells[1], "lot_type 칸이 비었습니다"
+    page.click('#pageSwitch button[data-val="wac"]')
+
+
+def test_a_row_with_mixed_lot_types_is_summarised_like_other_columns(wac_page):
+    page, _planted, _traces, _errors = wac_page
+    got = page.evaluate("""() => groupHolds([
+      {lot_id: 'A.1', rw_cnt: 0, wafer_id: 1, lot_type: 'MP', hold_time: '2026-10-01T00:00:00'},
+      {lot_id: 'A.1', rw_cnt: 0, wafer_id: 2, lot_type: 'MP', hold_time: '2026-10-01T00:00:00'},
+      {lot_id: 'A.1', rw_cnt: 0, wafer_id: 3, lot_type: 'ENG', hold_time: '2026-10-01T00:00:00'},
+      {lot_id: 'B.1', rw_cnt: 0, wafer_id: 1, lot_type: '', hold_time: '2026-09-01T00:00:00'},
+    ]).map(r => r.lot_type)""")
+    assert got == ["MP외 1건", ""]
+
+
 @pytest.mark.parametrize("view", ["hold", "이력", "전체"])
 def test_python_and_the_browser_split_the_list_the_same_way(wac_page, view):
     """같은 규칙이 두 파일에 손으로 적혀 있다 -- 실제로 한쪽만 고쳐서 갈렸다.

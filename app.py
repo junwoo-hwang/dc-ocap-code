@@ -551,6 +551,7 @@ import gzip
 import json
 import math
 import re
+from collections import Counter
 import sys
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -1397,6 +1398,40 @@ def reachable_lots(dc_df, trend_df) -> set:
     return lots
 
 
+def _dc_for_export(dc_df, trend_df) -> pd.DataFrame:
+    """hold 리스트에 보여 줄 lot_type 을 trend 에서 찾아 붙인다.
+
+    hold(dc) 에는 lot_type 이 없고 trend 에는 wafer 마다 있다. 같은
+    (root_lot_id, wafer, rw_cnt) 의 측정을 먼저 찾고, 없으면 같은 root_lot_id
+    에서 가장 많은 lot_type 을 쓴다 (한 lot 의 wafer 는 대개 lot_type 이
+    같다). 어디에도 없으면 빈 칸이다. dc 가 이미 lot_type 을 들고 오면 그대로
+    둔다 -- 원본에 있는 값이 더 정확하다. 원본 프레임은 고치지 않는다.
+    """
+    if dc_df is None or not hasattr(dc_df, "columns") or "lot_type" in dc_df.columns:
+        return dc_df
+    out = dc_df.copy()
+    if (not len(out) or trend_df is None or not hasattr(trend_df, "columns")
+            or "lot_type" not in trend_df.columns):
+        out["lot_type"] = None
+        return out
+    rws = trend_df["rw_cnt"] if "rw_cnt" in trend_df.columns else [None] * len(trend_df)
+    by_wafer: dict = {}
+    by_lot: dict = {}
+    for root, wafer, rw, lot_type in zip(trend_df["root_lot_id"], trend_df["wafer_id"],
+                                         rws, trend_df["lot_type"]):
+        if lot_type is None or pd.isna(lot_type) or not str(lot_type).strip():
+            continue
+        lot_type = str(lot_type).strip()
+        by_wafer.setdefault((norm_lot(root), norm_wafer(wafer), norm_rw_cnt(rw)), lot_type)
+        by_lot.setdefault(norm_lot(root), Counter())[lot_type] += 1
+    most = {lot: counts.most_common(1)[0][0] for lot, counts in by_lot.items()}
+    out["lot_type"] = [
+        by_wafer.get((norm_lot(root), norm_wafer(wafer), norm_rw_cnt(rw)))
+        or most.get(norm_lot(root))
+        for root, wafer, rw in zip(out["root_lot_id"], out["wafer_id"], out["rw_cnt"])]
+    return out
+
+
 def _split_for_export(split_df, keep_lots=None) -> pd.DataFrame:
     """split 을 EINECN 팝업이 쓸 모양으로: 필요한 칸만, 정해진 순서로.
 
@@ -1457,7 +1492,9 @@ def build_dc_ocap_html() -> Path:
         print(f"  참고: {w}")
 
     data = {
-        "dc": {p: _columns(product_dc[p]) for p in product_dc},
+        # lot_type 은 hold 리스트에 보이려고 trend 에서 찾아 붙인다
+        "dc": {p: _columns(_dc_for_export(product_dc[p], product_trend.get(p)))
+               for p in product_dc},
         "trend": {p: _columns(product_trend[p]) for p in product_trend},
         "itemCols": {
             p: item_columns(product_trend[p])

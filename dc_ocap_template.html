@@ -341,6 +341,7 @@
           <thead>
             <tr id="listHeaderRow">
               <th data-col="rw_cnt">rw_cnt<span class="sort-arrow"></span></th>
+              <th data-col="lot_type">lot_type<span class="sort-arrow"></span></th>
               <th data-col="hold_time">hold_time<span class="sort-arrow"></span></th>
               <th data-col="lot_id">lot_id<span class="sort-arrow"></span></th>
               <th data-col="wafer_id">wafer_id<span class="sort-arrow"></span></th>
@@ -620,7 +621,7 @@ const state = {
 // status is deliberately not here: it decides hold vs 이력 (see
 // filterByStatus), but a flowed lot turns into ship a few days later,
 // so as a displayed value it just goes stale. Mirrors GROUP_COLS.
-const LIST_COLS = ["rw_cnt", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
+const LIST_COLS = ["rw_cnt", "lot_type", "hold_time", "lot_id", "wafer_id", "item", "hold_inform", "code", "owner"];
 
 // ---- pure helpers (ports of app.py's norm_lot / norm_wafer / etc.) ----
 function normLot(v) { return String(v).trim(); }
@@ -786,6 +787,9 @@ function groupHolds(dcRows) {
     for (const r of grp) { if (r.hold_time && (!holdTime || r.hold_time > holdTime)) holdTime = r.hold_time; }
     return {
       rw_cnt: grp[0].rw_cnt ?? "",
+      // app.py 가 trend 에서 찾아 붙인 것. 한 행(lot, rw_cnt)의 wafer 들이
+      // 서로 다르면 다른 칸처럼 'P외 1건' 으로 줄인다
+      lot_type: summarize(grp.map(r => r.lot_type)),
       hold_time: holdTime,
       lot_id: grp[0].lot_id,
       wafer_id: sortWafers(grp.map(r => r.wafer_id)).join(","),
